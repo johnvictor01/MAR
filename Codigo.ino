@@ -6,12 +6,13 @@ SFE_BMP180 pressure;
 #define Skib 7
 #define vermelho 4
 #define Verde 5
-#define ButtonAltimeter 3
 #define buzzer 2
 #define isWorking 12
+#define ButtonAltimeter 3
 #define MAX_ALTITUDE_ADDRESS 0
 #define BASE_PRESSURE_ADDRESS 2
-#define WINDOW_SIZE 5 
+#define WINDOW_SIZE 5
+#define ASCENT_THRESHOLD 2.0  // Altitude em metros para considerar que o foguete começou a subir
 
 double baseline;
 double altitudePoints[1000];
@@ -23,16 +24,17 @@ int jumpDescida = 30;
 int contadorDeTempo = 0;
 bool isDescending = false;
 bool sensorConnected = false;
+bool rocketHasStartedAscent = false;  // Flag para verificar se o foguete começou a subir
 
-double alturasSuavizadas[3] = {0, 0, 0}; 
-double altitudeReadings[WINDOW_SIZE] = {0}; 
+double alturasSuavizadas[3] = {0, 0, 0};
+double altitudeReadings[WINDOW_SIZE] = {0};
 int currentReadingIndex = 0;
 int totalReadings = 0;
 
-// constantes de tempo 
+// constantes de tempo
 // Intervalos em milissegundos
-const unsigned long BLINK_INTERVAL = 1000; // pisca a cada 1 s
-const unsigned long BLINK_ON_TIME  = 2000;  // LED fica ligado 100 ms
+const unsigned long BLINK_INTERVAL = 1000; // ciclo completo de 1 segundo
+const unsigned long BLINK_ON_TIME  = 100;  // LED fica ligado 100 ms
 const unsigned long BEEP_INTERVAL  = 5000; // beep a cada 5 s
 const unsigned long BEEP_ON_TIME   = 100;  // buzzer ligado 100 ms
 
@@ -62,7 +64,7 @@ void setup() {
   pinMode(Verde, OUTPUT);
   pinMode(vermelho, OUTPUT);
   pinMode(ButtonAltimeter, INPUT);
-  
+ 
 
   sensorConnected = pressure.begin();
   if (!sensorConnected) {
@@ -78,20 +80,8 @@ void setup() {
 }
 
 void loop() {
-  if (digitalRead(ButtonAltimeter) == LOW) {
-    resetBaseline();
-    for (int i = 0; i < 10; i++) {
-      ledVerde(false);
-      ledVermelho(true);
-      delay(200);
-      ledVerde(true);
-      ledVermelho(false);
-      delay(200);
-    }
-  }
-  
-  
-  
+ 
+ 
   double P = getPressure();
   if (P != -1) {
     double rawAltitude = pressure.altitude(P, baseline);
@@ -102,6 +92,12 @@ void loop() {
     alturasSuavizadas[0] = smoothedAltitude;
 
     Serial.println(smoothedAltitude);
+
+    // Verificar se o foguete começou a subir
+    if (!rocketHasStartedAscent && smoothedAltitude >= ASCENT_THRESHOLD) {
+      rocketHasStartedAscent = true;
+      Serial.println("Foguete começou a subir! Ativando buzzer.");
+    }
 
     int jump = isDescending ? jumpDescida : jumpSubida;
 
@@ -122,7 +118,7 @@ void loop() {
       armado = false;
       isDescending = true;
       saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
-      
+     
     }
 
     if (!armado) {
@@ -135,7 +131,12 @@ void loop() {
 
   atualizarEstadoSensor();
   updateWorkingLED();
-  updateBuzzerPeriodic();  
+  
+  // Somente atualiza o buzzer se o foguete já começou a subir
+  if (rocketHasStartedAscent) {
+    updateBuzzerPeriodic();
+  }
+  
   delay(50);
 }
 
@@ -221,12 +222,6 @@ void saveBaselineToEEPROM(double pressure) {
   EEPROM.put(BASE_PRESSURE_ADDRESS, pressure);
 }
 
-void resetBaseline() {
-  baseline = getPressure();
-  saveBaselineToEEPROM(baseline);
-  Serial.println("Baseline resetado.");
-}
-
 void ledVerde(bool estado) {
   digitalWrite(Verde, estado ? HIGH : LOW);
 }
@@ -239,15 +234,15 @@ void ledVermelho(bool estado) {
 void updateWorkingLED() {
   unsigned long currentMillis = millis();
 
-  // Tempo para iniciar um novo ciclo de pisca?
+  // Verifica onde estamos no ciclo de piscada
   if (currentMillis - previousBlinkMillis >= BLINK_INTERVAL) {
+    // Inicia um novo ciclo
     previousBlinkMillis = currentMillis;
-    ledWorkingState = HIGH;               // acende
+    ledWorkingState = HIGH;
     digitalWrite(isWorking, ledWorkingState);
   }
-  // Após BLINK_ON_TIME, apaga
-  else if (ledWorkingState == HIGH && 
-           currentMillis - previousBlinkMillis >= BLINK_ON_TIME) {
+  // Se já passou o tempo de ficar ligado, desliga
+  else if (currentMillis - previousBlinkMillis >= BLINK_ON_TIME) {
     ledWorkingState = LOW;
     digitalWrite(isWorking, ledWorkingState);
   }
@@ -275,4 +270,3 @@ void updateBuzzerPeriodic() {
     }
   }
 }
-
