@@ -1,13 +1,14 @@
 #include <SFE_BMP180.h>
 #include <Wire.h>
 #include <EEPROM.h>
-
+//d2 buzzer d3 reset altimeter  d4 led vermelho d5 led verde d7 skib d12 ledligado
 SFE_BMP180 pressure;
-#define Skib 8
+#define Skib 7
 #define vermelho 4
-#define Verde 2
+#define Verde 5
 #define ButtonAltimeter 3
-#define ButtonIsOperating 5
+#define buzzer 2
+#define isWorking 12
 #define MAX_ALTITUDE_ADDRESS 0
 #define BASE_PRESSURE_ADDRESS 2
 #define WINDOW_SIZE 5 
@@ -28,15 +29,40 @@ double altitudeReadings[WINDOW_SIZE] = {0};
 int currentReadingIndex = 0;
 int totalReadings = 0;
 
+// constantes de tempo 
+// Intervalos em milissegundos
+const unsigned long BLINK_INTERVAL = 1000; // pisca a cada 1 s
+const unsigned long BLINK_ON_TIME  = 2000;  // LED fica ligado 100 ms
+const unsigned long BEEP_INTERVAL  = 5000; // beep a cada 5 s
+const unsigned long BEEP_ON_TIME   = 100;  // buzzer ligado 100 ms
+
+// Estado do LED de trabalho
+unsigned long previousBlinkMillis = 0;
+bool ledWorkingState = LOW;
+
+// ——— Configuração do buzzer periódico ———
+const unsigned long BEEP_PERIOD    = 5000;  // intervalo entre beeps (ms)
+const unsigned long BEEP_DURATION  =  500;  // duração de cada beep (ms)
+const unsigned int  BEEP_FREQUENCY = 2000;  // frequência do tom (Hz)
+
+unsigned long previousBeepTime = 0;
+bool isBeeping = false;
+
+// Estado do buzzer
+unsigned long previousBeepMillis = 0;
+bool buzzerState = HIGH; // buzzer inativo é HIGH
+
+
 void setup() {
   Serial.begin(9600);
   Serial.println("Iniciando");
-
+  pinMode(isWorking, OUTPUT);
+  pinMode(buzzer, OUTPUT);
   pinMode(Skib, OUTPUT);
   pinMode(Verde, OUTPUT);
   pinMode(vermelho, OUTPUT);
   pinMode(ButtonAltimeter, INPUT);
-  pinMode(ButtonIsOperating, INPUT)
+  
 
   sensorConnected = pressure.begin();
   if (!sensorConnected) {
@@ -52,7 +78,7 @@ void setup() {
 }
 
 void loop() {
-  if (digitalRead(ButtonAltimeter) == HIGH) {
+  if (digitalRead(ButtonAltimeter) == LOW) {
     resetBaseline();
     for (int i = 0; i < 10; i++) {
       ledVerde(false);
@@ -63,7 +89,9 @@ void loop() {
       delay(200);
     }
   }
-
+  
+  
+  
   double P = getPressure();
   if (P != -1) {
     double rawAltitude = pressure.altitude(P, baseline);
@@ -94,6 +122,7 @@ void loop() {
       armado = false;
       isDescending = true;
       saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
+      
     }
 
     if (!armado) {
@@ -105,6 +134,8 @@ void loop() {
   }
 
   atualizarEstadoSensor();
+  updateWorkingLED();
+  updateBuzzerPeriodic();  
   delay(50);
 }
 
@@ -203,3 +234,45 @@ void ledVerde(bool estado) {
 void ledVermelho(bool estado) {
   digitalWrite(vermelho, estado ? HIGH : LOW);
 }
+
+// Atualiza o LED "working" (pino 12) sem bloquear
+void updateWorkingLED() {
+  unsigned long currentMillis = millis();
+
+  // Tempo para iniciar um novo ciclo de pisca?
+  if (currentMillis - previousBlinkMillis >= BLINK_INTERVAL) {
+    previousBlinkMillis = currentMillis;
+    ledWorkingState = HIGH;               // acende
+    digitalWrite(isWorking, ledWorkingState);
+  }
+  // Após BLINK_ON_TIME, apaga
+  else if (ledWorkingState == HIGH && 
+           currentMillis - previousBlinkMillis >= BLINK_ON_TIME) {
+    ledWorkingState = LOW;
+    digitalWrite(isWorking, ledWorkingState);
+  }
+}
+
+// Dispara o buzzer em tom fixo sem travar o loop
+void updateBuzzerPeriodic() {
+  unsigned long now = millis();
+
+  if (!isBeeping) {
+    // hora de iniciar um novo beep?
+    if (now - previousBeepTime >= BEEP_PERIOD) {
+      tone(buzzer, BEEP_FREQUENCY);  // começa o tom
+      isBeeping = true;
+      previousBeepTime = now;
+    }
+  }
+  else {
+    // já tocou o suficiente?
+    if (now - previousBeepTime >= BEEP_DURATION) {
+      noTone(buzzer);               // para o tom
+      isBeeping = false;
+      // deixa previousBeepTime marcado para contar o próximo período
+      previousBeepTime = now;
+    }
+  }
+}
+
