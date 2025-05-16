@@ -3,16 +3,20 @@
 #include <EEPROM.h>
 //d2 buzzer d3 reset altimeter  d4 led vermelho d5 led verde d7 skib d12 ledligado
 SFE_BMP180 pressure;
-#define Skib 7
-#define vermelho 4
-#define Verde 5
-#define buzzer 2
-#define isWorking 12
-#define ButtonAltimeter 3
+#define PIN_SKIB 7
+#define PIN_LED_RED 4
+#define PIN_LED_GREEN 5
+#define PIN_BUZZER 2
+#define PIN_LED_WORKING 12
+#define PIN_BUTTON_ALTIMETER 3
 #define MAX_ALTITUDE_ADDRESS 0
 #define BASE_PRESSURE_ADDRESS 2
 #define WINDOW_SIZE 5
-#define ASCENT_THRESHOLD 2.0  // Altitude em metros para considerar que o foguete começou a subir
+#define ASCENT_THRESHOLD 5.0  // Altitude em metros para considerar que o foguete começou a subir
+#define DESCENT_DETECTION_THRESHOLD 5.0  // Diferença em metros para detectar descida
+#define JUMP_ASCENT 3
+#define JUMP_DESCENT 30
+#define SKIB_DEACTIVATION_TIME 400  // Contagem para desativar o SKIB
 
 double baseline;
 double altitudePoints[1000];
@@ -57,13 +61,13 @@ bool buzzerState = HIGH; // buzzer inativo é HIGH
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("Iniciando");
-  pinMode(isWorking, OUTPUT);
-  pinMode(buzzer, OUTPUT);
-  pinMode(Skib, OUTPUT);
-  pinMode(Verde, OUTPUT);
-  pinMode(vermelho, OUTPUT);
-  pinMode(ButtonAltimeter, INPUT);
+  Serial.println("Iniciando sistema de altímetro");
+  pinMode(PIN_LED_WORKING, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_SKIB, OUTPUT);
+  pinMode(PIN_LED_GREEN, OUTPUT);
+  pinMode(PIN_LED_RED, OUTPUT);
+  pinMode(PIN_BUTTON_ALTIMETER, INPUT);
  
 
   sensorConnected = pressure.begin();
@@ -111,19 +115,16 @@ void loop() {
       }
     }
 
-    if (alturasSuavizadas[0] <= maxAltitude - 5.0 && armado &&
-        abs(alturasSuavizadas[0] - alturasSuavizadas[1]) < 5.0 &&
-        abs(alturasSuavizadas[1] - alturasSuavizadas[2]) < 5.0) {
-      ativaSkip();
-      armado = false;
-      isDescending = true;
-      saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
-     
+    // Verificar se deve ativar o sistema de recuperação
+    if (alturasSuavizadas[0] <= maxAltitude - DESCENT_DETECTION_THRESHOLD && 
+        armado &&
+        isAltitudeStable()) {
+      activateRecoverySystem();
     }
 
     if (!armado) {
       contadorDeTempo++;
-      if (contadorDeTempo >= 400) {
+      if (contadorDeTempo >= SKIB_DEACTIVATION_TIME) {
         desativarSkib();
       }
     }
@@ -179,37 +180,51 @@ double getSmoothedAltitude(double newAltitude) {
 
 double getPressure() {
   char status;
-  double T, P;
-  status = pressure.startTemperature();
-  if (status != 0) {
-    delay(status);
-    status = pressure.getTemperature(T);
-    if (status != 0) {
-      status = pressure.startPressure(1);
-      if (status != 0) {
-        delay(status);
-        status = pressure.getPressure(P, T);
-        if (status != 0) {
-          return P;
-        }
-      }
-    }
-  }
-  return -1;
+  double T, P;  // T = temperatura, P = pressão
+  
+  // ETAPA 1: Iniciar medição de temperatura
+  status = pressure.startTemperature();  // Inicia a medição de temperatura
+  if (status == 0) return -1;            // Se houver erro, interrompe imediatamente
+  
+  delay(status);  // Aguarda o tempo necessário para completar a medição
+  
+  // ETAPA 2: Obter a temperatura
+  status = pressure.getTemperature(T);   // Lê o valor da temperatura
+  if (status == 0) return -1;            // Se houver erro, interrompe imediatamente
+  
+  // ETAPA 3: Iniciar medição de pressão
+  status = pressure.startPressure(1);    // Inicia a medição de pressão (1 = resolução padrão)
+  if (status == 0) return -1;            // Se houver erro, interrompe imediatamente
+  
+  delay(status);  // Aguarda o tempo necessário para completar a medição
+  
+  // ETAPA 4: Obter a pressão (usando a temperatura como parâmetro)
+  status = pressure.getPressure(P, T);   // Lê o valor da pressão
+  if (status == 0) return -1;            // Se houver erro, interrompe imediatamente
+  
+  return P;  // Retorna o valor da pressão se tudo funcionou corretamente
 }
 
 void ativaSkip() {
-  digitalWrite(Skib, HIGH);
+  digitalWrite(PIN_SKIB, HIGH);
   ledVermelho(true);
 }
 
 void desativarSkib() {
-  digitalWrite(Skib, LOW);
+  digitalWrite(PIN_SKIB, LOW);
   ledVermelho(false);
 }
 
+// Salva a altitude máxima na EEPROM
 void saveMaxAltitudeToEEPROM(short int maxAltitudeInt) {
   EEPROM.put(MAX_ALTITUDE_ADDRESS, maxAltitudeInt);
+}
+
+// Lê a altitude máxima da EEPROM
+double readMaxAltitudeFromEEPROM() {
+  short int maxAltitudeInt;
+  EEPROM.get(MAX_ALTITUDE_ADDRESS, maxAltitudeInt);
+  return maxAltitudeInt / 10.0;
 }
 
 double readBaselineFromEEPROM() {
@@ -223,11 +238,11 @@ void saveBaselineToEEPROM(double pressure) {
 }
 
 void ledVerde(bool estado) {
-  digitalWrite(Verde, estado ? HIGH : LOW);
+  digitalWrite(PIN_LED_GREEN, estado ? HIGH : LOW);
 }
 
 void ledVermelho(bool estado) {
-  digitalWrite(vermelho, estado ? HIGH : LOW);
+  digitalWrite(PIN_LED_RED, estado ? HIGH : LOW);
 }
 
 // Atualiza o LED "working" (pino 12) sem bloquear
@@ -239,12 +254,12 @@ void updateWorkingLED() {
     // Inicia um novo ciclo
     previousBlinkMillis = currentMillis;
     ledWorkingState = HIGH;
-    digitalWrite(isWorking, ledWorkingState);
+    digitalWrite(PIN_LED_WORKING, ledWorkingState);
   }
   // Se já passou o tempo de ficar ligado, desliga
   else if (currentMillis - previousBlinkMillis >= BLINK_ON_TIME) {
     ledWorkingState = LOW;
-    digitalWrite(isWorking, ledWorkingState);
+    digitalWrite(PIN_LED_WORKING, ledWorkingState);
   }
 }
 
@@ -255,7 +270,7 @@ void updateBuzzerPeriodic() {
   if (!isBeeping) {
     // hora de iniciar um novo beep?
     if (now - previousBeepTime >= BEEP_PERIOD) {
-      tone(buzzer, BEEP_FREQUENCY);  // começa o tom
+      tone(PIN_BUZZER, BEEP_FREQUENCY);  // começa o tom
       isBeeping = true;
       previousBeepTime = now;
     }
@@ -263,10 +278,28 @@ void updateBuzzerPeriodic() {
   else {
     // já tocou o suficiente?
     if (now - previousBeepTime >= BEEP_DURATION) {
-      noTone(buzzer);               // para o tom
+      noTone(PIN_BUZZER);               // para o tom
       isBeeping = false;
       // deixa previousBeepTime marcado para contar o próximo período
       previousBeepTime = now;
     }
   }
+}
+
+// Verifica se as leituras de altitude estão estáveis
+bool isAltitudeStable() {
+  return abs(alturasSuavizadas[0] - alturasSuavizadas[1]) < 5.0 &&
+         abs(alturasSuavizadas[1] - alturasSuavizadas[2]) < 5.0;
+}
+
+// Ativa o sistema de recuperação
+void activateRecoverySystem() {
+  ativaSkip();
+  armado = false;
+  isDescending = true;
+  saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
+  
+  Serial.println("Sistema de recuperação ativado!");
+  Serial.print("Altitude máxima registrada: ");
+  Serial.println(maxAltitude);
 }
