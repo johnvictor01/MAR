@@ -16,7 +16,9 @@ SFE_BMP180 pressure;
 #define DESCENT_DETECTION_THRESHOLD 5.0  // Diferença em metros para detectar descida
 #define JUMP_ASCENT 3
 #define JUMP_DESCENT 30
-#define SKIB_DEACTIVATION_TIME 400  // Contagem para desativar o SKIB
+#define SKIB_DEACTIVATION_TIME 2000     // Contagem para desativar o SKIB
+
+
 
 double baseline;
 double altitudePoints[1000];
@@ -28,7 +30,10 @@ int jumpDescida = 30;
 int contadorDeTempo = 0;
 bool isDescending = false;
 bool sensorConnected = false;
-bool rocketHasStartedAscent = false;  // Flag para verificar se o foguete começou a subir
+//bool rocketHasStartedAscent = false;  // Flag para verificar se o foguete começou a subir
+
+unsigned long skibActivatedAt = 0;
+bool skibDeactivated  = false;
 
 double alturasSuavizadas[3] = {0, 0, 0};
 double altitudeReadings[WINDOW_SIZE] = {0};
@@ -36,11 +41,9 @@ int currentReadingIndex = 0;
 int totalReadings = 0;
 
 // constantes de tempo
-// Intervalos em milissegundos
+// Intervalos em milissegundos do led isWorking
 const unsigned long BLINK_INTERVAL = 1000; // ciclo completo de 1 segundo
 const unsigned long BLINK_ON_TIME  = 100;  // LED fica ligado 100 ms
-const unsigned long BEEP_INTERVAL  = 5000; // beep a cada 5 s
-const unsigned long BEEP_ON_TIME   = 100;  // buzzer ligado 100 ms
 
 // Estado do LED de trabalho
 unsigned long previousBlinkMillis = 0;
@@ -60,6 +63,8 @@ bool buzzerState = HIGH; // buzzer inativo é HIGH
 
 
 void setup() {
+
+  
   Serial.begin(9600);
   Serial.println("Iniciando sistema de altímetro");
   pinMode(PIN_LED_WORKING, OUTPUT);
@@ -81,61 +86,73 @@ void setup() {
     ledVerde(true);
     ledVermelho(false);
   }
+  resetBaseline();
+
 }
 
+
+  
 void loop() {
- 
- 
+   
   double P = getPressure();
   if (P != -1) {
-    double rawAltitude = pressure.altitude(P, baseline);
-    double smoothedAltitude = getSmoothedAltitude(rawAltitude);
+    double rawAltitude = pressure.altitude(P, baseline);  //  rawAltitude = altitude em metros daquele ponto
+    double smoothedAltitude = getSmoothedAltitude(rawAltitude); // vai pegar a media das ultimas 5 altitudes(suavizada)
 
-    alturasSuavizadas[2] = alturasSuavizadas[1];
+    alturasSuavizadas[2] = alturasSuavizadas[1];  
     alturasSuavizadas[1] = alturasSuavizadas[0];
     alturasSuavizadas[0] = smoothedAltitude;
 
     Serial.println(smoothedAltitude);
 
     // Verificar se o foguete começou a subir
-    if (!rocketHasStartedAscent && smoothedAltitude >= ASCENT_THRESHOLD) {
-      rocketHasStartedAscent = true;
-      Serial.println("Foguete começou a subir! Ativando buzzer.");
-    }
+    // if (!rocketHasStartedAscent && smoothedAltitude >= ASCENT_THRESHOLD) { 
+    //   rocketHasStartedAscent = true;
+    //   Serial.println("Foguete começou a subir! Ativando buzzer.");
+    // }
 
-    int jump = isDescending ? jumpDescida : jumpSubida;
+    int jump = isDescending ? jumpDescida : jumpSubida; //isdescending = false, vai saber se usa o jump de subida que pega mais dados, ou o de descida que pega menos dados
+  //começa com a taxa de amostragem da subida 3 (salva na eeprom)
 
+
+    //if de salvamento dos dados (tem 512bytes na eeprom)
+    //perguntar pra john pq 1000(deveria ser cada byte da eeprom!)
     if (altitudeIndex < 1000 && smoothedAltitude > 3.0) {
       if (altitudeIndex % jump == 0) {
         altitudePoints[altitudeIndex] = smoothedAltitude;
-      }
-      altitudeIndex++;
+      }//saber a taxa de amostragem se é de subida ou descida
+      altitudeIndex++;//passa pro proximo byte da eeprom
       if (smoothedAltitude > maxAltitude) {
         maxAltitude = smoothedAltitude;
+        //maxAltitude = rawAltitude //é importante saber o apogeu real e nao suavizado? no apogeu a velocidade é 0 entao poderia deixar suavizado
       }
     }
 
-    // Verificar se deve ativar o sistema de recuperação
-    if (alturasSuavizadas[0] <= maxAltitude - DESCENT_DETECTION_THRESHOLD && 
+    // Verificar se deve ativar o sistema de recuperação ao começar a descer um limiar do apogeu 
+    if (alturasSuavizadas[0] <= maxAltitude - DESCENT_DETECTION_THRESHOLD &&   
         armado &&
         isAltitudeStable()) {
       activateRecoverySystem();
     }
 
-    if (!armado) {
-      contadorDeTempo++;
-      if (contadorDeTempo >= SKIB_DEACTIVATION_TIME) {
-        desativarSkib();
-      }
+    if (!armado 
+        && !skibDeactivated 
+        && millis() - skibActivatedAt >= SKIB_DEACTIVATION_TIME) {
+      desativarSkib();        // só vai rodar uma vez
+      skibDeactivated = true; // garante que nunca mais entre aqui
+      Serial.println("SKIB desativado após timeout.");
     }
   }
 
-  atualizarEstadoSensor();
-  updateWorkingLED();
+  atualizarEstadoSensor(); //
+  updateWorkingLED(); //
   
-  // Somente atualiza o buzzer se o foguete já começou a subir
-  if (rocketHasStartedAscent) {
+  if (smoothedAltitude < 5.0) {
     updateBuzzerPeriodic();
+  } else {
+    noTone(PIN_BUZZER);
+    isBeeping = false;
+    previousBeepTime = millis();
   }
   
   delay(50);
@@ -149,7 +166,7 @@ void atualizarEstadoSensor() {
   }
 }
 
-void reconectarSensor() {
+void reconectarSensor() { //se o sensor ta funcionando o led verde ta aceso
   sensorConnected = pressure.begin();
   if (sensorConnected) {
     Serial.println("Sensor reconectado com sucesso.");
@@ -163,13 +180,13 @@ void reconectarSensor() {
   }
 }
 
-// Outras funções existentes permanecem inalteradas
-double getSmoothedAltitude(double newAltitude) {
-  altitudeReadings[currentReadingIndex] = newAltitude;
-  currentReadingIndex = (currentReadingIndex + 1) % WINDOW_SIZE;
+
+double getSmoothedAltitude(double newAltitude) { //faz  a media das ultimas windowsize altitudes
+  altitudeReadings[currentReadingIndex] = newAltitude; //o indice atual recebe a altura atual
+  currentReadingIndex = (currentReadingIndex + 1) % WINDOW_SIZE; // contador de 1 a 5
 
   double sum = 0;
-  int count = totalReadings < WINDOW_SIZE ? totalReadings : WINDOW_SIZE;
+  int count = totalReadings < WINDOW_SIZE ? totalReadings : WINDOW_SIZE;  //if totalreadins(começa em 0), menor que o vetor window size 5
   for (int i = 0; i < count; i++) {
     sum += altitudeReadings[i];
   }
@@ -247,22 +264,20 @@ void ledVermelho(bool estado) {
 
 // Atualiza o LED "working" (pino 12) sem bloquear
 void updateWorkingLED() {
-  unsigned long currentMillis = millis();
+  unsigned long now = millis();
 
-  // Verifica onde estamos no ciclo de piscada
-  if (currentMillis - previousBlinkMillis >= BLINK_INTERVAL) {
-    // Inicia um novo ciclo
-    previousBlinkMillis = currentMillis;
-    ledWorkingState = HIGH;
-    digitalWrite(PIN_LED_WORKING, ledWorkingState);
+  // 1) Reseta o ciclo a cada BLINK_INTERVAL
+  if (now - previousBlinkMillis >= BLINK_INTERVAL) {
+    previousBlinkMillis = now;
   }
-  // Se já passou o tempo de ficar ligado, desliga
-  else if (currentMillis - previousBlinkMillis >= BLINK_ON_TIME) {
-    ledWorkingState = LOW;
-    digitalWrite(PIN_LED_WORKING, ledWorkingState);
+
+  // 2) Liga o LED durante os primeiros BLINK_ON_TIME ms do ciclo, caso contrário desliga
+  if (now - previousBlinkMillis < BLINK_ON_TIME) {
+    digitalWrite(PIN_LED_WORKING, HIGH);
+  } else {
+    digitalWrite(PIN_LED_WORKING, LOW);
   }
 }
-
 // Dispara o buzzer em tom fixo sem travar o loop
 void updateBuzzerPeriodic() {
   unsigned long now = millis();
@@ -292,14 +307,20 @@ bool isAltitudeStable() {
          abs(alturasSuavizadas[1] - alturasSuavizadas[2]) < 5.0;
 }
 
+void resetBaseline() {
+  baseline = getPressure();
+  saveBaselineToEEPROM(baseline);
+  Serial.println("Baseline resetado.");
+}
+
+
 // Ativa o sistema de recuperação
 void activateRecoverySystem() {
-  ativaSkip();
-  armado = false;
+  ativaSkip();               // liga o SKIB
+  armado = false;           
   isDescending = true;
+  skibActivatedAt = millis();  // marca o instante de acionamento
+  skibDeactivated  = false;    // garante que ainda não desativamos
   saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
-  
   Serial.println("Sistema de recuperação ativado!");
-  Serial.print("Altitude máxima registrada: ");
-  Serial.println(maxAltitude);
 }
