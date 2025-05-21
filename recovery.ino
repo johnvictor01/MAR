@@ -21,7 +21,13 @@ SFE_BMP180 pressure;
 #define JUMP_DESCENT 30
 #define SKIB_DEACTIVATION_TIME 2000     // Contagem para desativar o SKIB
 
+// Intervalos para gravação na EEPROM
+#define RECORD_INTERVAL_ASCENT 50     // 50ms durante a subida (maior frequência)
+#define RECORD_INTERVAL_DESCENT 200   // 200ms durante a descida (menor frequência)
 
+// Variáveis para gravação na EEPROM
+unsigned int recordCounter = 0;        // Contador de registros gravados
+unsigned long lastRecordTime = 0;      // Tempo da última gravação
 
 double baseline;
 double altitudePoints[1000];
@@ -129,6 +135,24 @@ void loop() {
         maxAltitude = smoothedAltitude;
         //maxAltitude = rawAltitude //é importante saber o apogeu real e nao suavizado? no apogeu a velocidade é 0 entao poderia deixar suavizado
       }
+    }
+
+    // Escolher intervalo de gravação com base se está subindo ou descendo
+    int currentRecordInterval = isDescending ? RECORD_INTERVAL_DESCENT : RECORD_INTERVAL_ASCENT;
+
+    // Gravar altitude na EEPROM com intervalo adaptativo
+    if (millis() - lastRecordTime >= currentRecordInterval && recordCounter < MAX_FLIGHT_DATA_POINTS) {
+      saveAltitudeToEEPROM(rawAltitude, recordCounter);
+      recordCounter++;
+      lastRecordTime = millis();
+      
+      // Log mais detalhado
+      Serial.print(isDescending ? "DESCIDA" : "SUBIDA");
+      Serial.print(" - Ponto ");
+      Serial.print(recordCounter);
+      Serial.print(": ");
+      Serial.print(rawAltitude);
+      Serial.println("m");
     }
 
     // Verificar se deve ativar o sistema de recuperação ao começar a descer um limiar do apogeu 
