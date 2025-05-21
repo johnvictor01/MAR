@@ -1,0 +1,136 @@
+// Sketch para simular dados de voo na EEPROM
+// Este programa preenche a EEPROM com dados simulados de um voo de foguete
+// para testar o readeeprom.ino
+
+#include <EEPROM.h>
+
+// Constantes (as mesmas usadas em rec.ino e readeeprom.ino)
+#define MAX_ALTITUDE_ADDRESS 0        // Altitude máxima (2 bytes - short int)
+#define BASE_PRESSURE_ADDRESS 2       // Pressão base (4 bytes - double)
+#define FLIGHT_DATA_START_ADDRESS 6   // Início dos dados de voo
+#define ALTITUDE_SCALE_FACTOR 10.0    // Fator de escala: multiplicar por 10 para preservar 1 casa decimal
+#define MAX_FLIGHT_DATA_POINTS 100    // Vamos simular 100 pontos de voo
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {
+    ; // Aguardar conexão serial (útil para placas como Leonardo/Micro)
+  }
+  
+  Serial.println("Iniciando simulação de dados de voo na EEPROM...");
+  
+  // 1. Simular altitude máxima (150 metros)
+  double maxAltitudeReal = 150.0;
+  short int maxAltitudeScaled = (short int)(maxAltitudeReal * ALTITUDE_SCALE_FACTOR);
+  EEPROM.put(MAX_ALTITUDE_ADDRESS, maxAltitudeScaled);
+  Serial.print("Altitude máxima simulada: ");
+  Serial.print(maxAltitudeReal);
+  Serial.println(" metros");
+  
+  // 2. Simular pressão base (1013.25 hPa - pressão ao nível do mar padrão)
+  double basePressure = 1013.25;
+  EEPROM.put(BASE_PRESSURE_ADDRESS, basePressure);
+  Serial.print("Pressão base simulada: ");
+  Serial.print(basePressure);
+  Serial.println(" hPa");
+  
+  // 3. Simular dados de voo
+  Serial.println("Gerando perfil de voo simulado...");
+  
+  // Padrão: subida rápida até 150m, depois descida mais gradual
+  int ascendingPoints = 40;  // Pontos na subida
+  int descendingPoints = 60; // Pontos na descida
+  
+  // Preencher os pontos de subida (0 até apogeu)
+  for (int i = 0; i < ascendingPoints; i++) {
+    // Simular subida com aceleração inicial e desaceleração próximo ao apogeu
+    // Fórmula: altitude = maxAltitude * (i/ascendingPoints)^2, com variação aleatória
+    double percentComplete = (double)i / ascendingPoints;
+    double altitude = maxAltitudeReal * percentComplete * percentComplete * 4 * (1 - percentComplete);
+    
+    // Adicionar "ruído" para simular pequenas variações na leitura
+    altitude += random(-5, 5) / 10.0;
+    
+    // Se for o último ponto da subida, garantir que está próximo ao máximo
+    if (i == ascendingPoints - 1) {
+      altitude = maxAltitudeReal - 0.5;
+    }
+    
+    // Salvar na EEPROM
+    saveAltitudePoint(i, altitude);
+    
+    Serial.print("Ponto #");
+    Serial.print(i);
+    Serial.print(" (subida): ");
+    Serial.print(altitude, 1);
+    Serial.println(" metros");
+  }
+  
+  // Preencher os pontos de descida (apogeu até pouso)
+  for (int i = 0; i < descendingPoints; i++) {
+    int index = ascendingPoints + i;
+    
+    // Simular descida com retardo do paraquedas e depois queda mais rápida
+    double percentComplete = (double)i / descendingPoints;
+    
+    // Queda lenta inicial (paraquedas abrindo) e depois mais rápida
+    double altitude;
+    if (percentComplete < 0.2) {
+      // Descida lenta inicial (abertura do paraquedas)
+      altitude = maxAltitudeReal * (1.0 - percentComplete * 0.2);
+    } else {
+      // Descida mais rápida
+      altitude = maxAltitudeReal * 0.96 * pow(0.95, (i - descendingPoints * 0.2) * 2);
+    }
+    
+    // Adicionar "ruído" para simular pequenas variações na leitura
+    altitude += random(-8, 8) / 10.0;
+    
+    // Garantir que os valores finais sejam próximos a zero
+    if (i > descendingPoints - 5) {
+      altitude = altitude * (descendingPoints - i) / 5.0;
+    }
+    
+    // Salvar na EEPROM
+    saveAltitudePoint(index, altitude);
+    
+    Serial.print("Ponto #");
+    Serial.print(index);
+    Serial.print(" (descida): ");
+    Serial.print(altitude, 1);
+    Serial.println(" metros");
+  }
+  
+  // Limpar pontos restantes (opcional)
+  for (int i = ascendingPoints + descendingPoints; i < MAX_FLIGHT_DATA_POINTS; i++) {
+    short int zero = 0;
+    int address = FLIGHT_DATA_START_ADDRESS + (i * 2);
+    EEPROM.put(address, zero);
+  }
+  
+  Serial.println("\nSimulação completa! EEPROM preenchida com dados de voo simulados.");
+  Serial.println("Agora você pode executar o readeeprom.ino para visualizar estes dados.");
+}
+
+void loop() {
+  // Nada para fazer aqui
+}
+
+// Função auxiliar para salvar um ponto de altitude na EEPROM
+void saveAltitudePoint(int index, double altitude) {
+  // Converter altitude para short int com fator de escala
+  short int altitudeScaled;
+  
+  // Tratamento para altitudes fora do intervalo representável
+  if (altitude < -3276.8) {
+    altitudeScaled = -32768;
+  } else if (altitude > 3276.7) {
+    altitudeScaled = 32767;
+  } else {
+    altitudeScaled = (short int)(altitude * ALTITUDE_SCALE_FACTOR);
+  }
+  
+  // Calcular o endereço na EEPROM e salvar
+  int address = FLIGHT_DATA_START_ADDRESS + (index * 2);
+  EEPROM.put(address, altitudeScaled);
+} 
