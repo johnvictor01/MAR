@@ -20,6 +20,8 @@ SFE_BMP180 pressure;
 #define JUMP_ASCENT 3
 #define JUMP_DESCENT 30
 #define SKIB_DEACTIVATION_TIME 2000     // Contagem para desativar o SKIB
+#define SKIB_BUZZER_DURATION 4000       // Duração do buzzer durante ativação do SKIB (4 segundos)
+#define MIN_ALTITUDE_TO_RECORD 5.0      // Altitude mínima para iniciar gravação na EEPROM
 
 // Intervalos para gravação na EEPROM
 #define RECORD_INTERVAL_ASCENT 50     // 50ms durante a subida (maior frequência)
@@ -40,9 +42,14 @@ int contadorDeTempo = 0;
 bool isDescending = false;
 bool sensorConnected = false;
 bool apogeuDetectado = false; // Flag que indica se já detectamos o apogeu
+double smoothedAltitude = 0;  // Adicionada como variável global
 
 unsigned long skibActivatedAt = 0;
 bool skibDeactivated  = false;
+
+// Variáveis para controle do buzzer durante ativação do SKIB
+bool skibBuzzerActive = false;
+unsigned long skibBuzzerEndTime = 0;
 
 double alturasSuavizadas[3] = {0, 0, 0};
 double altitudeReadings[WINDOW_SIZE] = {0};
@@ -106,7 +113,7 @@ void loop() {
   double P = getPressure();
   if (P != -1) {
     double rawAltitude = pressure.altitude(P, baseline);  //  rawAltitude = altitude em metros daquele ponto
-    double smoothedAltitude = getSmoothedAltitude(rawAltitude); // vai pegar a media das ultimas 5 altitudes(suavizada)
+    smoothedAltitude = getSmoothedAltitude(rawAltitude); // vai pegar a media das ultimas 5 altitudes(suavizada)
 
     alturasSuavizadas[2] = alturasSuavizadas[1];  
     alturasSuavizadas[1] = alturasSuavizadas[0];
@@ -140,8 +147,11 @@ void loop() {
     // Escolher intervalo de gravação com base se está subindo ou descendo
     int currentRecordInterval = isDescending ? RECORD_INTERVAL_DESCENT : RECORD_INTERVAL_ASCENT;
 
-    // Gravar altitude na EEPROM com intervalo adaptativo
-    if (millis() - lastRecordTime >= currentRecordInterval && recordCounter < MAX_FLIGHT_DATA_POINTS) {
+    // Gravar altitude na EEPROM com intervalo adaptativo - APENAS SE ALTURA > 5m
+    if (millis() - lastRecordTime >= currentRecordInterval && 
+        recordCounter < MAX_FLIGHT_DATA_POINTS && 
+        rawAltitude >= MIN_ALTITUDE_TO_RECORD) {
+      
       saveAltitudeToEEPROM(rawAltitude, recordCounter);
       recordCounter++;
       lastRecordTime = millis();
@@ -173,18 +183,34 @@ void loop() {
     }
   }
 
+  // Gerenciar o buzzer durante a ativação do SKIB
+  updateSkibBuzzer();
+  
   atualizarEstadoSensor(); //
   updateWorkingLED(); //
   
-  if (smoothedAltitude < 5.0) {
+  if (smoothedAltitude < 5.0 && !skibBuzzerActive) {
     updateBuzzerPeriodic();
-  } else {
+  } else if (!skibBuzzerActive) {
     noTone(PIN_BUZZER);
     isBeeping = false;
     previousBeepTime = millis();
   }
   
   delay(50);
+}
+
+// Gerencia o buzzer durante a ativação do SKIB
+void updateSkibBuzzer() {
+  if (skibBuzzerActive) {
+    // Se o tempo de buzzer do SKIB acabou
+    if (millis() >= skibBuzzerEndTime) {
+      noTone(PIN_BUZZER);
+      skibBuzzerActive = false;
+      Serial.println("Buzzer do SKIB finalizado.");
+    }
+    // Caso contrário, manter o buzzer ligado
+  }
 }
 
 // Salva a altitude na EEPROM como um short int
@@ -385,5 +411,11 @@ void activateRecoverySystem() {
   skibActivatedAt = millis();  // marca o instante de acionamento
   skibDeactivated  = false;    // garante que ainda não desativamos
   saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
-  Serial.println("Sistema de recuperação ativado!");
+  
+  // Ativa o buzzer por 4 segundos
+  tone(PIN_BUZZER, BEEP_FREQUENCY);
+  skibBuzzerActive = true;
+  skibBuzzerEndTime = millis() + SKIB_BUZZER_DURATION;
+  
+  Serial.println("Sistema de recuperação ativado com buzzer!");
 }
