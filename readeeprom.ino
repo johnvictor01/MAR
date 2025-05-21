@@ -1,69 +1,97 @@
-// Arduino Nano Sketch: Read EEPROM Addresses 0 to 512 and Print with Address Labels
-// 
-// This sketch reads the EEPROM contents from address 0 to 512
-// and prints each byte in the Serial Monitor with its address.
-// Ensure you have <EEPROM.h> available (built-in) and a Serial Monitor open.
+// Arduino Nano Sketch: Visualizador de dados de voo da EEPROM
+// Lê e interpreta a trajetória do foguete armazenada na EEPROM
 
 #include <EEPROM.h>
 
-// Constantes para identificar tipos de dados especiais na EEPROM
-#define MAX_ALTITUDE_ADDRESS 0    // Endereço da altitude máxima (short int - 2 bytes)
-#define BASE_PRESSURE_ADDRESS 2   // Endereço da pressão base (double - 4 bytes) 
-#define FLIGHT_DATA_START_ADDRESS 6  // Início dos dados do voo (short int - 2 bytes por ponto)
-#define ALTITUDE_SCALE_FACTOR 10.0    // Fator de escala usado para converter altitude em short int
-#define RECORD_INTERVAL_ASCENT 50     // 50ms durante a subida (maior frequência)
-#define RECORD_INTERVAL_DESCENT 200   // 200ms durante a descida (menor frequência)
+// Constantes para identificar tipos de dados na EEPROM
+#define MAX_ALTITUDE_ADDRESS 0        // Altitude máxima (2 bytes - short int)
+#define BASE_PRESSURE_ADDRESS 2       // Pressão base (4 bytes - double)
+#define FLIGHT_DATA_START_ADDRESS 6   // Início dos dados de voo
+#define ALTITUDE_SCALE_FACTOR 10.0    // Fator de escala para converter altitude
+#define RECORD_INTERVAL_ASCENT 50     // 50ms durante a subida
+#define RECORD_INTERVAL_DESCENT 200   // 200ms durante a descida
+
+// Flag para controle de modo de operação
+bool useOriginalBaseline = true;   // Por padrão, usa a pressão base original da EEPROM
+int skipPoints = 0;                // Número de pontos iniciais a ignorar
 
 void setup() {
-  // Initialize serial communication at 9600 baud
   Serial.begin(9600);
-  // Wait for serial port to connect (useful for Leonardo/Micro)
   while (!Serial) {
-    ;
+    ; // Aguardar conexão serial
   }
 
-  Serial.println("Starting EEPROM dump...");
+  Serial.println("Lendo dados de voo da EEPROM...");
 
-  // Leitura e interpretação da altitude máxima (endereços 0-1)
+  // Leitura da altitude máxima
   short int maxAltitudeInt;
   EEPROM.get(MAX_ALTITUDE_ADDRESS, maxAltitudeInt);
   float maxAltitude = maxAltitudeInt / ALTITUDE_SCALE_FACTOR;
   
-  Serial.println("------ DADOS IMPORTANTES ------");
-  Serial.print("Altitude Máxima (raw): ");
-  Serial.print(maxAltitudeInt);
-  Serial.print(" (");
-  Serial.print(maxAltitude);
-  Serial.println(" metros)");
-  
-  // Leitura da pressão base (endereços 2-5)
+  // Leitura da pressão base
   double basePressure;
   EEPROM.get(BASE_PRESSURE_ADDRESS, basePressure);
+  
+  Serial.println("\n------ DADOS IMPORTANTES ------");
+  Serial.print("Altitude Máxima: ");
+  Serial.print(maxAltitude, 1);
+  Serial.println(" metros");
+  
   Serial.print("Pressão Base: ");
   Serial.print(basePressure);
   Serial.println(" hPa");
   Serial.println("-----------------------------");
-  Serial.println();
-
-  // Opção 1: Ver o dump completo byte a byte
-  Serial.println("Pressione 'd' para dump completo ou qualquer outra tecla para prosseguir...");
+  
+  // Menu com nova opção para pular pontos iniciais
+  Serial.println("\nOPÇÕES:");
+  Serial.println("1 - Mostrar trajetória completa");
+  Serial.println("2 - Ignorar primeiros N pontos (para recuperar voo anterior)");
+  Serial.println("d - Ver dump completo da EEPROM");
+  
   while (!Serial.available()) {
     // Aguardar entrada
   }
   
-  if (Serial.read() == 'd') {
+  char choice = Serial.read();
+  
+  // Verificar opção escolhida
+  if (choice == 'd' || choice == 'D') {
     dumpCompleteEEPROM();
+    return;
   }
-  Serial.println();
+  else if (choice == '2') {
+    // Ignorar pontos iniciais
+    Serial.flush();
+    Serial.println("\nDigite o número de pontos iniciais a ignorar:");
+    
+    // Aguardar entrada numérica
+    skipPoints = 0;
+    while (true) {
+      if (Serial.available()) {
+        char c = Serial.read();
+        
+        // Se pressionar Enter, terminou a entrada
+        if (c == '\n' || c == '\r') {
+          break;
+        }
+        // Se for dígito, adicionar ao número
+        else if (c >= '0' && c <= '9') {
+          skipPoints = skipPoints * 10 + (c - '0');
+        }
+      }
+    }
+    
+    Serial.print("Ignorando os primeiros ");
+    Serial.print(skipPoints);
+    Serial.println(" pontos da trajetória...");
+  }
   
-  // Mostrar dados de voo em formato tabular
-  Serial.println("------ DADOS DE VOO ------");
-  Serial.println("Amostra\tTempo(ms)\tValor Raw\tAltitude(m)\tEstimativa Fase");
-  
+  // Mostrar dados de voo em formato simplificado
   int altitudePeak = 0;
   int peakIndex = 0;
+  int totalPoints = 0;
   
-  // Primeiro loop para encontrar o pico de altitude
+  // Primeiro loop para encontrar o total de pontos e o pico de altitude
   for (int i = 0; i < 250; i++) {
     int addr = FLIGHT_DATA_START_ADDRESS + (i * 2);
     if (addr >= 512) break; 
@@ -76,19 +104,134 @@ void setup() {
       short int prevValue;
       EEPROM.get(addr - 2, prevValue);
       if (prevValue == 0 || abs(prevValue) < 10) {
+        totalPoints = i;
         break;
       }
     }
     
-    // Encontrar o pico
+    totalPoints = i + 1;
+    
+    // Encontrar o pico (considerar os pontos ignorados também)
     if (altitudeValue > altitudePeak) {
       altitudePeak = altitudeValue;
       peakIndex = i;
     }
   }
   
-  // Segundo loop para exibir dados com informações de fase
+  // Verificar se temos pontos suficientes após ignorar os N primeiros
+  if (skipPoints >= totalPoints) {
+    Serial.println("\nERRO: Número de pontos a ignorar é maior que o total de pontos na trajetória!");
+    Serial.print("Total de pontos na EEPROM: ");
+    Serial.println(totalPoints);
+    return;
+  }
+  
+  // Mostrar trajetória simplificada
+  Serial.println("\n------ TRAJETÓRIA DO VOO ------");
+  Serial.println("Ponto\tTempo(ms)\tAltitude(m)\tFase");
+  
   int validPoints = 0;
+  for (int i = skipPoints; i < totalPoints; i++) {
+    int addr = FLIGHT_DATA_START_ADDRESS + (i * 2);
+    if (addr >= 512) break;
+    
+    short int altitudeValue;
+    EEPROM.get(addr, altitudeValue);
+    
+    float altitudeMeters = altitudeValue / ALTITUDE_SCALE_FACTOR;
+    validPoints++;
+    
+    // Fase (subida ou descida)
+    String phase = (i >= peakIndex) ? "DESCIDA" : "SUBIDA";
+    
+    // Calcular o tempo estimado (relativo ao início da trajetória, após os pontos ignorados)
+    float estimatedTime;
+    if (i <= peakIndex) {
+      estimatedTime = (i - skipPoints) * RECORD_INTERVAL_ASCENT;
+    } else {
+      estimatedTime = (peakIndex - skipPoints) * RECORD_INTERVAL_ASCENT + 
+                     (i - peakIndex) * RECORD_INTERVAL_DESCENT;
+      if (estimatedTime < 0) estimatedTime = 0; // Evitar tempos negativos
+    }
+    
+    // Imprimir dados de forma mais limpa
+    Serial.print(i - skipPoints);  // Ponto relativo (iniciando em 0 após os ignorados)
+    Serial.print("\t");
+    Serial.print(estimatedTime);
+    Serial.print("\t\t");
+    Serial.print(altitudeMeters, 1);
+    Serial.print("\t\t");
+    Serial.println(phase);
+  }
+  
+  // Resumo dos dados de voo - usando a altitude máxima consistente
+  Serial.println("\n------ RESUMO DO VOO ------");
+  Serial.print("Altitude máxima: ");
+  Serial.print(maxAltitude, 1);  // Usar o mesmo valor mostrado no início
+  Serial.println(" metros");
+  
+  // Ajustar o cálculo do tempo baseado nos pontos ignorados
+  int adjustedPeakIndex = peakIndex - skipPoints;
+  if (adjustedPeakIndex < 0) {
+    Serial.println("Aviso: O apogeu ocorreu nos pontos ignorados!");
+    adjustedPeakIndex = 0;
+  }
+  
+  Serial.print("Tempo até o apogeu: ");
+  Serial.print((adjustedPeakIndex * RECORD_INTERVAL_ASCENT) / 1000.0, 1);
+  Serial.println(" segundos");
+  
+  Serial.print("Duração do voo: ");
+  float flightDuration;
+  if (validPoints <= adjustedPeakIndex) {
+    flightDuration = validPoints * RECORD_INTERVAL_ASCENT;
+  } else {
+    flightDuration = adjustedPeakIndex * RECORD_INTERVAL_ASCENT + 
+                     (validPoints - adjustedPeakIndex) * RECORD_INTERVAL_DESCENT;
+  }
+  Serial.print(flightDuration / 1000.0, 1);
+  Serial.println(" segundos");
+  
+  Serial.print("Total de pontos visualizados: ");
+  Serial.print(validPoints);
+  Serial.print(" (ignorados ");
+  Serial.print(skipPoints);
+  Serial.println(" pontos iniciais)");
+  
+  // Aviso sobre possíveis inconsistências
+  if (skipPoints > 0) {
+    Serial.println("\nNOTA: A trajetória mostrada pode ter inconsistências devido aos pontos ignorados.");
+  }
+}
+
+void loop() {
+  // Nada para fazer aqui
+}
+
+void dumpCompleteEEPROM() {
+  Serial.println("\n------ DUMP COMPLETO DA EEPROM ------");
+  Serial.println("Endereço\tValor\tInterpretação");
+  
+  // Mostrar altitude máxima
+  short int maxAltitude;
+  EEPROM.get(MAX_ALTITUDE_ADDRESS, maxAltitude);
+  Serial.print("0-1\t\t");
+  Serial.print(maxAltitude);
+  Serial.print("\tAltitude máxima: ");
+  Serial.print(maxAltitude / ALTITUDE_SCALE_FACTOR, 1);
+  Serial.println(" metros");
+  
+  // Mostrar pressão base
+  double baseP;
+  EEPROM.get(BASE_PRESSURE_ADDRESS, baseP);
+  Serial.print("2-5\t\t");
+  Serial.print(baseP);
+  Serial.println("\tPressão base (hPa)");
+  
+  // Mostrar dados de voo
+  Serial.println("\n--- PONTOS DE ALTITUDE ---");
+  Serial.println("Endereço\tPonto\tValor\tAltitude(m)");
+  
   for (int i = 0; i < 250; i++) {
     int addr = FLIGHT_DATA_START_ADDRESS + (i * 2);
     if (addr >= 512) break;
@@ -96,7 +239,7 @@ void setup() {
     short int altitudeValue;
     EEPROM.get(addr, altitudeValue);
     
-    // Verificar fim dos dados
+    // Parar se encontrar sequência de zeros
     if (altitudeValue == 0 && i > 5) {
       short int prevValue;
       EEPROM.get(addr - 2, prevValue);
@@ -105,124 +248,19 @@ void setup() {
       }
     }
     
-    float altitudeMeters = altitudeValue / ALTITUDE_SCALE_FACTOR;
-    validPoints++;
-    
-    // Estimar a fase (subida ou descida) com base na posição relativa ao pico
-    String phase = "SUBIDA";
-    int timeInterval = RECORD_INTERVAL_ASCENT;
-    
-    if (i >= peakIndex) {
-      phase = "DESCIDA";
-      timeInterval = RECORD_INTERVAL_DESCENT;
-    }
-    
-    // Calcular o tempo estimado considerando intervalos diferentes para subida e descida
-    float estimatedTime;
-    if (i <= peakIndex) {
-      estimatedTime = i * RECORD_INTERVAL_ASCENT;  // Tempo durante a subida
-    } else {
-      // Tempo até o pico (usando intervalo de subida) + tempo adicional (usando intervalo de descida)
-      estimatedTime = peakIndex * RECORD_INTERVAL_ASCENT + 
-                     (i - peakIndex) * RECORD_INTERVAL_DESCENT;
-    }
-    
+    // Mostrar dados de altitude em formato mais limpo
+    Serial.print(addr);
+    Serial.print("-");
+    Serial.print(addr+1);
+    Serial.print("\t\t");
     Serial.print(i);
     Serial.print("\t");
-    Serial.print(estimatedTime);
-    Serial.print("\t\t");
-    Serial.print(altitudeValue);  // Valor raw (short int)
-    Serial.print("\t\t");
-    Serial.print(altitudeMeters, 1);  // Altitude em metros com 1 casa decimal
-    Serial.print("\t\t");
-    Serial.println(phase);
-  }
-  
-  // Resumo dos dados de voo
-  Serial.println("\n------ RESUMO DO VOO ------");
-  Serial.print("Altitude máxima (raw): ");
-  Serial.print(altitudePeak);
-  Serial.print(" (");
-  Serial.print(altitudePeak / ALTITUDE_SCALE_FACTOR, 1);
-  Serial.println(" metros)");
-  
-  Serial.print("Amostra do apogeu: #");
-  Serial.println(peakIndex);
-  
-  Serial.print("Tempo estimado até o apogeu: ");
-  Serial.print(peakIndex * RECORD_INTERVAL_ASCENT);
-  Serial.println(" ms");
-  
-  Serial.print("Total de pontos válidos: ");
-  Serial.println(validPoints);
-  
-  Serial.print("Duração estimada do voo: ");
-  float flightDuration;
-  if (validPoints <= peakIndex) {
-    flightDuration = validPoints * RECORD_INTERVAL_ASCENT;
-  } else {
-    flightDuration = peakIndex * RECORD_INTERVAL_ASCENT + 
-                     (validPoints - peakIndex) * RECORD_INTERVAL_DESCENT;
-  }
-  Serial.print(flightDuration / 1000.0, 2);  // Converter para segundos
-  Serial.println(" segundos");
-  
-  Serial.println("\nEEPROM dump complete.");
-}
-
-void loop() {
-  // Nothing to do here
-}
-
-void dumpCompleteEEPROM() {
-  Serial.println("------ DUMP COMPLETO DA EEPROM ------");
-  for (int addr = 0; addr < 512; addr++) {
-    // Read a single byte from EEPROM
-    byte value = EEPROM.read(addr);
-
-    // Print address label and its stored value
-    Serial.print("Address ");
-    Serial.print(addr);
-    Serial.print(": ");
-    Serial.print(value);
-
-    // Adicionar interpretações especiais para cada tipo de dado
-    if (addr == 0 || addr == 1) {
-      // Parte da altitude máxima (short int)
-      if (addr == 0) {
-        Serial.print(" (Parte da altitude máxima)");
-      }
-    } 
-    else if (addr >= 2 && addr <= 5) {
-      // Parte da pressão base (double)
-      Serial.print(" (Parte da pressão base)");
-    }
-    else if (addr >= FLIGHT_DATA_START_ADDRESS) {
-      // Verificar se é o primeiro byte de um short int (endereço par)
-      if ((addr - FLIGHT_DATA_START_ADDRESS) % 2 == 0) {
-        // Ler o short int completo
-        short int altitudeValue;
-        EEPROM.get(addr, altitudeValue);
-        
-        // Calcular o número da amostra
-        int sampleNumber = (addr - FLIGHT_DATA_START_ADDRESS) / 2;
-        
-        Serial.print(" (Altitude #");
-        Serial.print(sampleNumber);
-        Serial.print(" raw: ");
-        Serial.print(altitudeValue);
-        Serial.print(", ");
-        Serial.print(altitudeValue / ALTITUDE_SCALE_FACTOR, 1);
-        Serial.print(" metros)");
-      } else {
-        Serial.print(" (Parte de short int)");
-      }
-    }
+    Serial.print(altitudeValue);
+    Serial.print("\t");
+    Serial.println(altitudeValue / ALTITUDE_SCALE_FACTOR, 1);
     
-    Serial.println();
-
-    // Small delay for readability
-    delay(5);
+    // Pequeno atraso para legibilidade
+    delay(1);
   }
 }
                         
