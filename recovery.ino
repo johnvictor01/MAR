@@ -9,8 +9,11 @@ SFE_BMP180 pressure;
 #define PIN_BUZZER 2
 #define PIN_LED_WORKING 12
 #define PIN_BUTTON_ALTIMETER 3
-#define MAX_ALTITUDE_ADDRESS 0
-#define BASE_PRESSURE_ADDRESS 2
+#define MAX_ALTITUDE_ADDRESS 0        // Altitude máxima (2 bytes - short int)
+#define BASE_PRESSURE_ADDRESS 2       // Pressão base (4 bytes - double)
+#define FLIGHT_DATA_START_ADDRESS 6   // Início dos dados de voo (após os 6 bytes usados)
+#define MAX_FLIGHT_DATA_POINTS 250    // Total de pontos (EEPROM: 512 - 6 = 506 bytes / 2 = 253, arredondamos para 250)
+#define ALTITUDE_SCALE_FACTOR 10.0    // Fator de escala: multiplicar por 10 para preservar 1 casa decimal
 #define WINDOW_SIZE 5
 #define ASCENT_THRESHOLD 5.0  // Altitude em metros para considerar que o foguete começou a subir
 #define DESCENT_DETECTION_THRESHOLD 5.0  // Diferença em metros para detectar descida
@@ -18,7 +21,10 @@ SFE_BMP180 pressure;
 #define JUMP_DESCENT 30
 #define SKIB_DEACTIVATION_TIME 2000     // Contagem para desativar o SKIB
 
-
+// Variáveis para gravação na EEPROM
+unsigned int recordCounter = 0;        // Contador de registros gravados
+unsigned long lastRecordTime = 0;      // Tempo da última gravação
+const int RECORD_INTERVAL = 100;       // Intervalo de gravação em milissegundos
 
 double baseline;
 double altitudePoints[1000];
@@ -128,6 +134,17 @@ void loop() {
       }
     }
 
+    // Gravar altitude na EEPROM a cada RECORD_INTERVAL ms
+    if (millis() - lastRecordTime >= RECORD_INTERVAL && recordCounter < MAX_FLIGHT_DATA_POINTS) {
+      saveAltitudeToEEPROM(rawAltitude, recordCounter);
+      recordCounter++;
+      lastRecordTime = millis();
+      Serial.print("Gravado ponto ");
+      Serial.print(recordCounter);
+      Serial.print(": ");
+      Serial.println(rawAltitude);
+    }
+
     // Verificar se deve ativar o sistema de recuperação ao começar a descer um limiar do apogeu 
     if (alturasSuavizadas[0] <= maxAltitude - DESCENT_DETECTION_THRESHOLD &&   
         armado &&
@@ -156,6 +173,39 @@ void loop() {
   }
   
   delay(50);
+}
+
+// Salva a altitude na EEPROM como um short int
+void saveAltitudeToEEPROM(double altitude, unsigned int index) {
+  // Converte altitude para short int com fator de escala
+  short int altitudeScaled;
+  
+  // Limitação: tratamento para altitudes fora do intervalo representável
+  if (altitude < -3276.8) {
+    altitudeScaled = -32768;
+  } else if (altitude > 3276.7) {
+    altitudeScaled = 32767;
+  } else {
+    altitudeScaled = (short int)(altitude * ALTITUDE_SCALE_FACTOR);  // Multiplica por 10 para preservar uma casa decimal
+  }
+  
+  // Calcula o endereço na EEPROM (cada registro ocupa 2 bytes)
+  int address = FLIGHT_DATA_START_ADDRESS + (index * 2);
+  
+  // Grava o short int na EEPROM
+  EEPROM.put(address, altitudeScaled);
+}
+
+// Lê a altitude da EEPROM
+double readAltitudeFromEEPROM(unsigned int index) {
+  int address = FLIGHT_DATA_START_ADDRESS + (index * 2);
+  short int altitudeScaled;
+  
+  // Lê o short int da EEPROM
+  EEPROM.get(address, altitudeScaled);
+  
+  // Converte de volta para double
+  return altitudeScaled / ALTITUDE_SCALE_FACTOR;
 }
 
 void atualizarEstadoSensor() {
@@ -319,6 +369,7 @@ void activateRecoverySystem() {
   ativaSkip();               // liga o SKIB
   armado = false;           
   isDescending = true;
+  ledVermelho(HIGH);
   skibActivatedAt = millis();  // marca o instante de acionamento
   skibDeactivated  = false;    // garante que ainda não desativamos
   saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
