@@ -12,7 +12,9 @@ SFE_BMP180 pressure;
 #define MAX_ALTITUDE_ADDRESS 0        // Altitude máxima (2 bytes - short int)
 #define BASE_PRESSURE_ADDRESS 2       // Pressão base (4 bytes - double)
 #define FLIGHT_DATA_START_ADDRESS 6   // Início dos dados de voo (após os 6 bytes usados)
-#define MAX_FLIGHT_DATA_POINTS 250    // Total de pontos (EEPROM: 512 - 6 = 506 bytes / 2 = 253, arredondamos para 250)
+// Eu (Hugo) acho que a EEPROM tem 1000 bytes. --------------------V 
+//#define MAX_FLIGHT_DATA_POINTS 250    // Total de pontos (EEPROM: 512 - 6 = 506 bytes / 2 = 253, arredondamos para 250)
+#define MAX_FLIGHT_DATA_POINTS 497    // Total de pontos (EEPROM: 1000 - 6 = 994 bytes / 2 = 497)
 #define ALTITUDE_SCALE_FACTOR 10.0    // Fator de escala: multiplicar por 10 para preservar 1 casa decimal
 #define WINDOW_SIZE 5
 #define ASCENT_THRESHOLD 5.0  // Altitude em metros para considerar que o foguete começou a subir
@@ -22,27 +24,43 @@ SFE_BMP180 pressure;
 #define SKIB_DEACTIVATION_TIME 2000     // Contagem para desativar o SKIB
 #define SKIB_BUZZER_DURATION 4000       // Duração do buzzer durante ativação do SKIB (4 segundos)
 #define MIN_ALTITUDE_TO_RECORD 5.0      // Altitude mínima para iniciar gravação na EEPROM
+#define PRE_FLIGHT_QUEUE_SIZE 4        // Tamanho da fila de pontos pré-voo
 
 // Intervalos para gravação na EEPROM
 #define RECORD_INTERVAL_ASCENT 50     // 50ms durante a subida (maior frequência)
 #define RECORD_INTERVAL_DESCENT 200   // 200ms durante a descida (menor frequência)
 
+// Estados do sistema
+enum FlightState {
+  PRE_FLIGHT,    // Pré-voo: monitorando altura, bipando, mas não gravando na EEPROM
+  ASCENT,        // Ascensão: gravando dados na EEPROM com alta frequência
+  RECOVERY       // Recuperação: SKIB ativado, gravando com baixa frequência
+};
+
 // Variáveis para gravação na EEPROM
 unsigned int recordCounter = 0;        // Contador de registros gravados
 unsigned long lastRecordTime = 0;      // Tempo da última gravação
+
+// Sistema de estados
+FlightState currentState = PRE_FLIGHT;
+
+// Fila circular para pontos pré-voo
+double preFlightQueue[PRE_FLIGHT_QUEUE_SIZE];
+int preFlightQueueIndex = 0;
+bool preFlightQueueFull = false;
 
 double baseline;
 double altitudePoints[1000];
 int altitudeIndex = 0;
 double maxAltitude = -999;
 bool armado = true;
-int jumpSubida = 3;
-int jumpDescida = 30;
+int jumpSubida = JUMP_ASCENT;
+int jumpDescida = JUMP_DESCENT;
 int contadorDeTempo = 0;
 bool isDescending = false;
 bool sensorConnected = false;
 bool apogeuDetectado = false; // Flag que indica se já detectamos o apogeu
-double smoothedAltitude = 0;  // Adicionada como variável global
+double smoothedAltitude = 0.0;  // Adicionada como variável global
 
 unsigned long skibActivatedAt = 0;
 bool skibDeactivated  = false;
@@ -51,8 +69,8 @@ bool skibDeactivated  = false;
 bool skibBuzzerActive = false;
 unsigned long skibBuzzerEndTime = 0;
 
-double alturasSuavizadas[3] = {0, 0, 0};
-double altitudeReadings[WINDOW_SIZE] = {0};
+double alturasSuavizadas[5] = {0, 0, 0, 0, 0};
+double altitudeReadings[WINDOW_SIZE] = {0}; // ? inicializando array com escalar?
 int currentReadingIndex = 0;
 int totalReadings = 0;
 
@@ -66,9 +84,14 @@ unsigned long previousBlinkMillis = 0;
 bool ledWorkingState = LOW;
 
 // ——— Configuração do buzzer periódico ———
-const unsigned long BEEP_PERIOD    = 5000;  // intervalo entre beeps (ms)
-const unsigned long BEEP_DURATION  =  500;  // duração de cada beep (ms)
-const unsigned int  BEEP_FREQUENCY = 2000;  // frequência do tom (Hz)
+const unsigned long BEEP_PERIOD_PREFLIGHT = 3000;  // intervalo entre beeps no pré-voo (ms)
+const unsigned long BEEP_PERIOD_ASCENT     = 1000;  // intervalo entre beeps na ascensão (ms)
+const unsigned long BEEP_PERIOD_RECOVERY   = 500;   // intervalo entre beeps na recuperação (ms)
+const unsigned long BEEP_DURATION  =  400;  // duração de cada beep (ms)
+const unsigned int  BEEP_FREQUENCY_PREFLIGHT = 1500;  // frequência para pré-voo (Hz)
+const unsigned int  BEEP_FREQUENCY_ASCENT    = 2093;  // frequência para ascensão (Hz) 
+const unsigned int  BEEP_FREQUENCY_RECOVERY  = 3136;  // frequência para recuperação (Hz)
+const unsigned int  BEEP_FREQUENCY_SKIB      = 2637;  // frequência após ativação do skib (Hz)
 
 unsigned long previousBeepTime = 0;
 bool isBeeping = false;
@@ -77,6 +100,9 @@ bool isBeeping = false;
 unsigned long previousBeepMillis = 0;
 bool buzzerState = HIGH; // buzzer inativo é HIGH
 
+// Controle de tempo para leitura do sensor (substitui o delay)
+const unsigned long SENSOR_READ_INTERVAL = 50;  // 50ms entre leituras do sensor
+unsigned long lastSensorReadTime = 0;
 
 void setup() {
 
@@ -101,103 +127,73 @@ void setup() {
     baseline = readBaselineFromEEPROM();
     ledVerde(true);
     ledVermelho(false);
-  }
-  resetBaseline();
+  }  resetBaseline();
+  
+  // Inicializar fila pré-voo
+  initializePreFlightQueue();
 
 }
 
 
   
 void loop() {
-   
-  double P = getPressure();
-  if (P != -1) {
-    double rawAltitude = pressure.altitude(P, baseline);  //  rawAltitude = altitude em metros daquele ponto
-    smoothedAltitude = getSmoothedAltitude(rawAltitude); // vai pegar a media das ultimas 5 altitudes(suavizada)
+  // Controlar frequência de leitura do sensor sem bloquear o programa
+  unsigned long currentTime = millis();
+  
+  // Só faz leitura do sensor a cada SENSOR_READ_INTERVAL ms
+  if (currentTime - lastSensorReadTime >= SENSOR_READ_INTERVAL) {
+    lastSensorReadTime = currentTime;
+    
+    double P = getPressure();
+    if (P != -1) {
+      double rawAltitude = pressure.altitude(P, baseline);
+      smoothedAltitude = getSmoothedAltitude(rawAltitude);
 
-    alturasSuavizadas[2] = alturasSuavizadas[1];  
-    alturasSuavizadas[1] = alturasSuavizadas[0];
-    alturasSuavizadas[0] = smoothedAltitude;
+      // Atualizar alturas suavizadas
+      updateSmoothAltitudeHistory();
 
-    Serial.println(smoothedAltitude);
+      Serial.print("Estado: ");
+      Serial.print(getStateString());
+      Serial.print(", Altitude: ");
+      Serial.println(smoothedAltitude);
 
-    // Verificar se o foguete começou a subir
-    // if (!rocketHasStartedAscent && smoothedAltitude >= ASCENT_THRESHOLD) { 
-    //   rocketHasStartedAscent = true;
-    //   Serial.println("Foguete começou a subir! Ativando buzzer.");
-    // }
+      // Lógica baseada em estados
+      switch (currentState) {
+        case PRE_FLIGHT:
+          handlePreFlightState();
+          break;
+        case ASCENT:
+          handleAscentState();
+          break;
+        case RECOVERY:
+          handleRecoveryState();
+          break;
+      }
 
-    int jump = isDescending ? jumpDescida : jumpSubida; //isdescending = false, vai saber se usa o jump de subida que pega mais dados, ou o de descida que pega menos dados
-  //começa com a taxa de amostragem da subida 3 (salva na eeprom)
+      // Verificar transições de estado
+      checkStateTransitions();
 
-
-    //if de salvamento dos dados (tem 512bytes na eeprom)
-    //perguntar pra john pq 1000(deveria ser cada byte da eeprom!)
-    if (altitudeIndex < 1000 && smoothedAltitude > 3.0) {
-      if (altitudeIndex % jump == 0) {
-        altitudePoints[altitudeIndex] = smoothedAltitude;
-      }//saber a taxa de amostragem se é de subida ou descida
-      altitudeIndex++;//passa pro proximo byte da eeprom
+      // Atualizar altitude máxima
       if (smoothedAltitude > maxAltitude) {
         maxAltitude = smoothedAltitude;
-        //maxAltitude = rawAltitude //é importante saber o apogeu real e nao suavizado? no apogeu a velocidade é 0 entao poderia deixar suavizado
+      }
+
+      // Gerenciar desativação do SKIB
+      if (!armado && !skibDeactivated && millis() - skibActivatedAt >= SKIB_DEACTIVATION_TIME) {
+        desativarSkib();
+        skibDeactivated = true;
+        Serial.println("SKIB desativado após timeout.");
       }
     }
-
-    // Escolher intervalo de gravação com base se está subindo ou descendo
-    int currentRecordInterval = isDescending ? RECORD_INTERVAL_DESCENT : RECORD_INTERVAL_ASCENT;
-
-    // Gravar altitude na EEPROM com intervalo adaptativo - APENAS SE ALTURA > 5m
-    if (millis() - lastRecordTime >= currentRecordInterval && 
-        recordCounter < MAX_FLIGHT_DATA_POINTS && 
-        rawAltitude >= MIN_ALTITUDE_TO_RECORD) {
-      
-      saveAltitudeToEEPROM(rawAltitude, recordCounter);
-      recordCounter++;
-      lastRecordTime = millis();
-      
-      // Log mais detalhado
-      Serial.print(isDescending ? "DESCIDA" : "SUBIDA");
-      Serial.print(" - Ponto ");
-      Serial.print(recordCounter);
-      Serial.print(": ");
-      Serial.print(rawAltitude);
-      Serial.println("m");
-    }
-
-    // Verificar se deve ativar o sistema de recuperação ao começar a descer um limiar do apogeu 
-    if (alturasSuavizadas[0] <= maxAltitude - DESCENT_DETECTION_THRESHOLD &&   
-        armado &&
-        isAltitudeStable()) {
-      activateRecoverySystem();
-      apogeuDetectado = true;
-      isDescending = true;
-    }
-
-    if (!armado 
-        && !skibDeactivated 
-        && millis() - skibActivatedAt >= SKIB_DEACTIVATION_TIME) {
-      desativarSkib();        // só vai rodar uma vez
-      skibDeactivated = true; // garante que nunca mais entre aqui
-      Serial.println("SKIB desativado após timeout.");
-    }
   }
 
-  // Gerenciar o buzzer durante a ativação do SKIB
+  // Gerenciar buzzer e LEDs (executam sempre, independente da leitura do sensor)
   updateSkibBuzzer();
+  atualizarEstadoSensor();
+  updateWorkingLED();
+  updateBuzzerByState();
   
-  atualizarEstadoSensor(); //
-  updateWorkingLED(); //
-  
-  if (smoothedAltitude < 5.0 && !skibBuzzerActive) {
-    updateBuzzerPeriodic();
-  } else if (!skibBuzzerActive) {
-    noTone(PIN_BUZZER);
-    isBeeping = false;
-    previousBeepTime = millis();
-  }
-  
-  delay(50);
+  // Removido o delay(50) - agora controlado por millis()
 }
 
 // Gerencia o buzzer durante a ativação do SKIB
@@ -310,7 +306,7 @@ double getPressure() {
   return P;  // Retorna o valor da pressão se tudo funcionou corretamente
 }
 
-void ativaSkip() {
+void ativaSkib() {
   digitalWrite(PIN_SKIB, HIGH);
   ledVermelho(true);
 }
@@ -366,24 +362,47 @@ void updateWorkingLED() {
     digitalWrite(PIN_LED_WORKING, LOW);
   }
 }
-// Dispara o buzzer em tom fixo sem travar o loop
-void updateBuzzerPeriodic() {
+// Dispara o buzzer baseado no estado atual do sistema
+void updateBuzzerByState() {
+  if (skibBuzzerActive) return; // Não interferir com o buzzer do SKIB
+  
   unsigned long now = millis();
+  unsigned long beepPeriod;
+  unsigned int beepFrequency;
+  
+  // Definir período e frequência baseado no estado
+  switch (currentState) {
+    case PRE_FLIGHT:
+      beepPeriod = BEEP_PERIOD_PREFLIGHT;
+      beepFrequency = BEEP_FREQUENCY_PREFLIGHT;
+      break;
+    case ASCENT:
+      beepPeriod = BEEP_PERIOD_ASCENT;
+      beepFrequency = BEEP_FREQUENCY_ASCENT;
+      break;
+    case RECOVERY:
+      if (armado) {
+        beepPeriod = BEEP_PERIOD_RECOVERY;
+        beepFrequency = BEEP_FREQUENCY_RECOVERY;
+      } else {
+        beepPeriod = BEEP_PERIOD_RECOVERY;
+        beepFrequency = BEEP_FREQUENCY_SKIB;
+      }
+      break;
+  }
 
   if (!isBeeping) {
-    // hora de iniciar um novo beep?
-    if (now - previousBeepTime >= BEEP_PERIOD) {
-      tone(PIN_BUZZER, BEEP_FREQUENCY);  // começa o tom
+    // Hora de iniciar um novo beep?
+    if (now - previousBeepTime >= beepPeriod) {
+      tone(PIN_BUZZER, beepFrequency);
       isBeeping = true;
       previousBeepTime = now;
     }
-  }
-  else {
-    // já tocou o suficiente?
+  } else {
+    // Já tocou o suficiente?
     if (now - previousBeepTime >= BEEP_DURATION) {
-      noTone(PIN_BUZZER);               // para o tom
+      noTone(PIN_BUZZER);
       isBeeping = false;
-      // deixa previousBeepTime marcado para contar o próximo período
       previousBeepTime = now;
     }
   }
@@ -398,24 +417,183 @@ bool isAltitudeStable() {
 void resetBaseline() {
   baseline = getPressure();
   saveBaselineToEEPROM(baseline);
-  Serial.println("Baseline resetado.");
+  Serial.print("Baseline resetado: ");
+  Serial.print(baseline);
+  Serial.println(" m (- nível do mar).");
 }
 
 
 // Ativa o sistema de recuperação
 void activateRecoverySystem() {
-  ativaSkip();               // liga o SKIB
+  ativaSkib();               // liga o SKIB
   armado = false;           
   isDescending = true;
+  currentState = RECOVERY;   // Transição para estado de recuperação
   ledVermelho(HIGH);
   skibActivatedAt = millis();  // marca o instante de acionamento
   skibDeactivated  = false;    // garante que ainda não desativamos
   saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
   
   // Ativa o buzzer por 4 segundos
-  tone(PIN_BUZZER, BEEP_FREQUENCY);
+  tone(PIN_BUZZER, BEEP_FREQUENCY_RECOVERY);
   skibBuzzerActive = true;
   skibBuzzerEndTime = millis() + SKIB_BUZZER_DURATION;
   
   Serial.println("Sistema de recuperação ativado com buzzer!");
+}
+
+// ========== NOVAS FUNÇÕES PARA SISTEMA DE ESTADOS ==========
+
+// Inicializa a fila de pontos pré-voo
+void initializePreFlightQueue() {
+  for (int i = 0; i < PRE_FLIGHT_QUEUE_SIZE; i++) {
+    preFlightQueue[i] = 0.0;
+  }
+  preFlightQueueIndex = 0;
+  preFlightQueueFull = false;
+}
+
+// Adiciona um ponto à fila circular pré-voo
+void addToPreFlightQueue(double altitude) {
+  preFlightQueue[preFlightQueueIndex] = altitude;
+  preFlightQueueIndex = (preFlightQueueIndex + 1) % PRE_FLIGHT_QUEUE_SIZE;
+  if (preFlightQueueIndex == 0) {
+    preFlightQueueFull = true;
+  }
+}
+
+// Atualiza o histórico de alturas suavizadas
+void updateSmoothAltitudeHistory() {
+  alturasSuavizadas[4] = alturasSuavizadas[3];  
+  alturasSuavizadas[3] = alturasSuavizadas[2];  
+  alturasSuavizadas[2] = alturasSuavizadas[1];  
+  alturasSuavizadas[1] = alturasSuavizadas[0];
+  alturasSuavizadas[0] = smoothedAltitude;
+}
+
+// Retorna string do estado atual
+String getStateString() {
+  switch (currentState) {
+    case PRE_FLIGHT: return "PRE_FLIGHT";
+    case ASCENT: return "ASCENT";
+    case RECOVERY: return "RECOVERY";
+    default: return "UNKNOWN";
+  }
+}
+
+// Gerencia o estado PRE_FLIGHT
+void handlePreFlightState() {
+  // Adicionar altitude atual à fila pré-voo
+  addToPreFlightQueue(smoothedAltitude);
+  
+  // Não grava na EEPROM durante pré-voo, apenas monitora
+  Serial.print("Pré-voo - Altitude: ");
+  Serial.print(smoothedAltitude);
+  Serial.println(" m (não gravando na EEPROM)");
+}
+
+// Gerencia o estado ASCENT
+void handleAscentState() {
+  // Gravar altitude na EEPROM com alta frequência
+  if (millis() - lastRecordTime >= RECORD_INTERVAL_ASCENT && 
+      recordCounter < MAX_FLIGHT_DATA_POINTS) {
+    
+    saveAltitudeToEEPROM(smoothedAltitude, recordCounter);
+    recordCounter++;
+    lastRecordTime = millis();
+    
+    Serial.print("ASCENSÃO - Ponto: ");
+    Serial.print(recordCounter);
+    Serial.print(", Tempo: ");
+    Serial.print(lastRecordTime);
+    Serial.print(" ms, Altura: ");
+    Serial.print(smoothedAltitude);
+    Serial.println(" m");
+  }
+}
+
+// Gerencia o estado RECOVERY
+void handleRecoveryState() {
+  // Gravar altitude na EEPROM com baixa frequência
+  if (millis() - lastRecordTime >= RECORD_INTERVAL_DESCENT && 
+      recordCounter < MAX_FLIGHT_DATA_POINTS) {
+    
+    saveAltitudeToEEPROM(smoothedAltitude, recordCounter);
+    recordCounter++;
+    lastRecordTime = millis();
+    
+    Serial.print("RECUPERAÇÃO - Ponto: ");
+    Serial.print(recordCounter);
+    Serial.print(", Tempo: ");
+    Serial.print(lastRecordTime);
+    Serial.print(" ms, Altura: ");
+    Serial.print(smoothedAltitude);
+    Serial.println(" m");
+  }
+}
+
+// Verifica e executa transições de estado
+void checkStateTransitions() {
+  switch (currentState) {
+    case PRE_FLIGHT:
+      // Transição para ASCENT quando altura ultrapassa threshold
+      if (smoothedAltitude >= ASCENT_THRESHOLD) {
+        currentState = ASCENT;
+        Serial.println("TRANSIÇÃO: PRE_FLIGHT -> ASCENT");
+        
+        // Salvar os pontos pré-voo na EEPROM
+        savePreFlightPointsToEEPROM();
+        
+        // Inicializar tempo de gravação
+        lastRecordTime = millis();
+      }
+      break;
+      
+    case ASCENT:
+      // Transição para RECOVERY quando detecta descida significativa
+      if (alturasSuavizadas[0] <= maxAltitude - DESCENT_DETECTION_THRESHOLD && armado) {
+        Serial.println("TRANSIÇÃO: ASCENT -> RECOVERY");
+        activateRecoverySystem();
+        apogeuDetectado = true;
+        isDescending = true;
+      }
+      break;
+      
+    case RECOVERY:
+      // Estado final - sem transições
+      break;
+  }
+}
+
+// Salva os pontos pré-voo na EEPROM
+void savePreFlightPointsToEEPROM() {
+  Serial.println("Salvando pontos pré-voo na EEPROM...");
+  
+  // Determinar quantos pontos salvar
+  int pointsToSave = preFlightQueueFull ? PRE_FLIGHT_QUEUE_SIZE : preFlightQueueIndex;
+  
+  // Salvar os pontos na ordem correta (mais antigo primeiro)
+  for (int i = 0; i < pointsToSave; i++) {
+    int queueIndex;
+    if (preFlightQueueFull) {
+      // Se a fila está cheia, começar do ponto mais antigo
+      queueIndex = (preFlightQueueIndex + i) % PRE_FLIGHT_QUEUE_SIZE;
+    } else {
+      // Se a fila não está cheia, começar do índice 0
+      queueIndex = i;
+    }
+    
+    double altitude = preFlightQueue[queueIndex];
+    saveAltitudeToEEPROM(altitude, recordCounter);
+    recordCounter++;
+    
+    Serial.print("Ponto pré-voo #");
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.print(altitude);
+    Serial.println(" m");
+  }
+  
+  Serial.print("Total de pontos pré-voo salvos: ");
+  Serial.println(pointsToSave);
 }
