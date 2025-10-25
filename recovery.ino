@@ -1,14 +1,19 @@
 #include <SFE_BMP180.h>
 #include <Wire.h>
 #include <EEPROM.h>
-//d2 buzzer d3 reset altimeter  d4 led vermelho d5 led verde d7 skib d12 ledligado
+
 SFE_BMP180 pressure;
-#define PIN_SKIB 7
-#define PIN_LED_RED 4
-#define PIN_LED_GREEN 5
+#define PIN_SKIB 1
 #define PIN_BUZZER 2
-#define PIN_LED_WORKING 12
-#define PIN_BUTTON_ALTIMETER 3
+#define PIN_LED_RED 6
+#define PIN_LED_GREEN 5
+#define PIN_LED_BLUE 3
+#define PIN_SPI_CS 10
+#define PIN_SPI_MOSI 11
+#define PIN_SPI_MISO 12 
+#define PIN_SPI_SCK 13
+
+
 #define MAX_ALTITUDE_ADDRESS 0        // Altitude máxima (2 bytes - short int)
 #define BASE_PRESSURE_ADDRESS 2       // Pressão base (4 bytes - double)
 #define FLIGHT_DATA_START_ADDRESS 6   // Início dos dados de voo (após os 6 bytes usados)
