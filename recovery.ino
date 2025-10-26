@@ -1,6 +1,11 @@
 #include <SFE_BMP180.h>
 #include <Wire.h>
 #include <EEPROM.h>
+#include <SD.h>
+
+// SD Card
+#define SD_CS_PIN 4
+File logFile;
 
 SFE_BMP180 pressure;
 #define PIN_SKIB 1
@@ -35,6 +40,9 @@ SFE_BMP180 pressure;
 #define RECORD_INTERVAL_ASCENT 50     // 50ms durante a subida (maior frequência)
 #define RECORD_INTERVAL_DESCENT 200   // 200ms durante a descida (menor frequência)
 
+// Intervalos para gravação no SD Card
+#define RECORD_INTERVAL_SD 10     // 10ms para gravação no SD Card
+
 // Estados do sistema
 enum FlightState {
   PRE_FLIGHT,    // Pré-voo: monitorando altura, bipando, mas não gravando na EEPROM
@@ -46,6 +54,9 @@ enum FlightState {
 unsigned int recordCounter = 0;        // Contador de registros gravados
 unsigned long lastRecordTime = 0;      // Tempo da última gravação
 
+// Variáveis para gravação no SD Card
+unsigned long lastSdRecordTime = 0;      // Tempo da última gravação no SD
+
 // Sistema de estados
 FlightState currentState = PRE_FLIGHT;
 
@@ -53,6 +64,7 @@ FlightState currentState = PRE_FLIGHT;
 double preFlightQueue[PRE_FLIGHT_QUEUE_SIZE];
 int preFlightQueueIndex = 0;
 bool preFlightQueueFull = false;
+
 
 double baseline;
 double altitudePoints[1000];
@@ -73,6 +85,7 @@ bool skibDeactivated  = false;
 // Variáveis para controle do buzzer durante ativação do SKIB
 bool skibBuzzerActive = false;
 unsigned long skibBuzzerEndTime = 0;
+
 
 double alturasSuavizadas[5] = {0, 0, 0, 0, 0};
 double altitudeReadings[WINDOW_SIZE] = {0}; // ? inicializando array com escalar?
@@ -111,7 +124,7 @@ unsigned long lastSensorReadTime = 0;
 
 void setup() {
 
-  
+
   Serial.begin(9600);
   Serial.println("Iniciando sistema de altímetro");
   pinMode(PIN_LED_WORKING, OUTPUT);
@@ -120,7 +133,7 @@ void setup() {
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_BUTTON_ALTIMETER, INPUT);
- 
+
 
   sensorConnected = pressure.begin();
   if (!sensorConnected) {
@@ -137,6 +150,64 @@ void setup() {
   // Inicializar fila pré-voo
   initializePreFlightQueue();
 
+  // Inicializar o cartão SD
+  setupSDCard();
+
+}
+
+void setupSDCard() {
+  Serial.print("Initializing SD card...");
+  pinMode(SD_CS_PIN, OUTPUT);
+
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("initialization failed!");
+    // Blink red LED to indicate SD card failure
+    while (1) {
+      digitalWrite(PIN_LED_RED, HIGH);
+      delay(200);
+      digitalWrite(PIN_LED_RED, LOW);
+      delay(200);
+    }
+  }
+  Serial.println("initialization done.");
+
+  // Create a new file
+  char fileName[] = "FLIGHT_00.CSV";
+  for (uint8_t i = 0; i < 100; i++) {
+    fileName[7] = i / 10 + '0';
+    fileName[8] = i % 10 + '0';
+    if (!SD.exists(fileName)) {
+      // Create the file
+      logFile = SD.open(fileName, FILE_WRITE);
+      break;
+    }
+  }
+
+  if (logFile) {
+    Serial.print("Logging to: ");
+    Serial.println(fileName);
+    logFile.println("Timestamp,Altitude,State");
+    logFile.flush();
+  } else {
+    Serial.println("Couldn't create file!");
+    // Blink red LED to indicate file creation failure
+    while (1) {
+      digitalWrite(PIN_LED_RED, HIGH);
+      delay(500);
+      digitalWrite(PIN_LED_RED, LOW);
+      delay(500);
+    }
+  }
+}
+
+void logDataToSD() {
+  if (logFile) {
+    logFile.print(millis());
+    logFile.print(",");
+    logFile.print(smoothedAltitude);
+    logFile.print(",");
+    logFile.println(getStateString());
+  }
 }
 
 
@@ -144,6 +215,14 @@ void setup() {
 void loop() {
   // Controlar frequência de leitura do sensor sem bloquear o programa
   unsigned long currentTime = millis();
+
+  // Grava no cartão SD em alta frequência
+  if (currentTime - lastSdRecordTime >= RECORD_INTERVAL_SD) {
+    lastSdRecordTime = currentTime;
+    if (currentState != PRE_FLIGHT) { // Começa a gravar no SD depois do PRE_FLIGHT
+        logDataToSD();
+    }
+  }
   
   // Só faz leitura do sensor a cada SENSOR_READ_INTERVAL ms
   if (currentTime - lastSensorReadTime >= SENSOR_READ_INTERVAL) {
