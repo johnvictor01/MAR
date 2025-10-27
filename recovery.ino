@@ -2,16 +2,15 @@
 #include <Wire.h>
 #include <EEPROM.h>
 #include <SD.h>
+#include <SPI.h>
 
-// SD Card
-#define SD_CS_PIN 4
 File logFile;
 
 SFE_BMP180 pressure;
 #define PIN_SKIB 1
 #define PIN_BUZZER 2
 #define PIN_LED_RED 6
-#define PIN_LED_GREEN 5
+#define PIN_LED_GREEN 5 //na placa do computador de bordo, está invertido com o blue, portanto depois mude esta linha pra 5 e a do blue para 3
 #define PIN_LED_BLUE 3
 #define PIN_SPI_CS 10
 #define PIN_SPI_MOSI 11
@@ -22,7 +21,6 @@ SFE_BMP180 pressure;
 #define MAX_ALTITUDE_ADDRESS 0        // Altitude máxima (2 bytes - short int)
 #define BASE_PRESSURE_ADDRESS 2       // Pressão base (4 bytes - double)
 #define FLIGHT_DATA_START_ADDRESS 6   // Início dos dados de voo (após os 6 bytes usados)
-// Eu (Hugo) acho que a EEPROM tem 1000 bytes. --------------------V 
 //#define MAX_FLIGHT_DATA_POINTS 250    // Total de pontos (EEPROM: 512 - 6 = 506 bytes / 2 = 253, arredondamos para 250)
 #define MAX_FLIGHT_DATA_POINTS 497    // Total de pontos (EEPROM: 1000 - 6 = 994 bytes / 2 = 497)
 #define ALTITUDE_SCALE_FACTOR 10.0    // Fator de escala: multiplicar por 10 para preservar 1 casa decimal
@@ -67,8 +65,6 @@ bool preFlightQueueFull = false;
 
 
 double baseline;
-double altitudePoints[1000];
-int altitudeIndex = 0;
 double maxAltitude = -999;
 bool armado = true;
 int jumpSubida = JUMP_ASCENT;
@@ -123,59 +119,65 @@ const unsigned long SENSOR_READ_INTERVAL = 50;  // 50ms entre leituras do sensor
 unsigned long lastSensorReadTime = 0;
 
 void setup() {
-
-
   Serial.begin(9600);
-  Serial.println("Iniciando sistema de altímetro");
-  pinMode(PIN_LED_WORKING, OUTPUT);
+  Serial.println(F("Iniciando sistema de altímetro"));
+
+  pinMode(PIN_LED_RED, OUTPUT);
+  pinMode(PIN_LED_GREEN, OUTPUT);
+  pinMode(PIN_LED_BLUE, OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
   pinMode(PIN_SKIB, OUTPUT);
-  pinMode(PIN_LED_GREEN, OUTPUT);
-  pinMode(PIN_LED_RED, OUTPUT);
-  pinMode(PIN_BUTTON_ALTIMETER, INPUT);
 
+  setRGB(0, 0, 255); // Blue light while booting
 
-  sensorConnected = pressure.begin();
-  if (!sensorConnected) {
-    Serial.println("BMP180 não encontrado! Tentando reconectar...");
-    ledVermelho(true);
-    ledVerde(false);
+  bool sdReady = setupSDCard();
+  bool sensorReady = pressure.begin();
+  sensorConnected = sensorReady;
+
+  if (sensorReady && sdReady) {
+    Serial.println(F("Sistema pronto. Altimetro e SD Card OK."));
+    setRGB(0, 255, 0); // Green
+    delay(1000); // Show green light for 1 second
   } else {
-    Serial.println("BMP180 inicializado com sucesso.");
-    baseline = readBaselineFromEEPROM();
-    ledVerde(true);
-    ledVermelho(false);
-  }  resetBaseline();
+    // Loop indefinitely and blink the error color
+    while (1) {
+      if (!sensorReady && !sdReady) {
+        Serial.println(F("ERRO: Falha no Altimetro e no SD Card!"));
+        setRGB(255, 0, 0); // Red
+      } else if (sensorReady && !sdReady) {
+        Serial.println(F("ERRO: Falha no SD Card!"));
+        setRGB(255, 255, 0); // Yellow
+      } else if (!sensorReady && sdReady) {
+        Serial.println(F("ERRO: Falha no Altimetro!"));
+        setRGB(255, 0, 255); // Magenta
+      }
+      delay(500);
+      setRGB(0, 0, 0); // Off
+      delay(500);
+    }
+  }
+
+  baseline = readBaselineFromEEPROM();
+  resetBaseline();
   
   // Inicializar fila pré-voo
   initializePreFlightQueue();
-
-  // Inicializar o cartão SD
-  setupSDCard();
-
 }
+bool setupSDCard() {
+  Serial.print(F("Initializing SD card..."));
+  pinMode(PIN_SPI_CS, OUTPUT);
 
-void setupSDCard() {
-  Serial.print("Initializing SD card...");
-  pinMode(SD_CS_PIN, OUTPUT);
-
-  if (!SD.begin(SD_CS_PIN)) {
-    Serial.println("initialization failed!");
-    // Blink red LED to indicate SD card failure
-    while (1) {
-      digitalWrite(PIN_LED_RED, HIGH);
-      delay(200);
-      digitalWrite(PIN_LED_RED, LOW);
-      delay(200);
-    }
+  if (!SD.begin(PIN_SPI_CS)) {
+    Serial.println(F("initialization failed!"));
+    return false;
   }
-  Serial.println("initialization done.");
+  Serial.println(F("initialization done."));
 
   // Create a new file
-  char fileName[] = "FLIGHT_00.CSV";
+  char fileName[] = "LOG_00.CSV";
   for (uint8_t i = 0; i < 100; i++) {
-    fileName[7] = i / 10 + '0';
-    fileName[8] = i % 10 + '0';
+    fileName[4] = i / 10 + '0';
+    fileName[5] = i % 10 + '0';
     if (!SD.exists(fileName)) {
       // Create the file
       logFile = SD.open(fileName, FILE_WRITE);
@@ -184,19 +186,14 @@ void setupSDCard() {
   }
 
   if (logFile) {
-    Serial.print("Logging to: ");
+    Serial.print(F("Logging to: "));
     Serial.println(fileName);
     logFile.println("Timestamp,Altitude,State");
     logFile.flush();
+    return true;
   } else {
-    Serial.println("Couldn't create file!");
-    // Blink red LED to indicate file creation failure
-    while (1) {
-      digitalWrite(PIN_LED_RED, HIGH);
-      delay(500);
-      digitalWrite(PIN_LED_RED, LOW);
-      delay(500);
-    }
+    Serial.println(F("Couldn't create file!"));
+    return false;
   }
 }
 
@@ -236,9 +233,9 @@ void loop() {
       // Atualizar alturas suavizadas
       updateSmoothAltitudeHistory();
 
-      Serial.print("Estado: ");
+      Serial.print(F("Estado: "));
       Serial.print(getStateString());
-      Serial.print(", Altitude: ");
+      Serial.print(F(", Altitude: "));
       Serial.println(smoothedAltitude);
 
       // Lógica baseada em estados
@@ -266,15 +263,14 @@ void loop() {
       if (!armado && !skibDeactivated && millis() - skibActivatedAt >= SKIB_DEACTIVATION_TIME) {
         desativarSkib();
         skibDeactivated = true;
-        Serial.println("SKIB desativado após timeout.");
+        Serial.println(F("SKIB desativado após timeout."));
       }
     }
   }
 
   // Gerenciar buzzer e LEDs (executam sempre, independente da leitura do sensor)
   updateSkibBuzzer();
-  atualizarEstadoSensor();
-  updateWorkingLED();
+  updateStateLED();
   updateBuzzerByState();
   
   // Removido o delay(50) - agora controlado por millis()
@@ -287,7 +283,7 @@ void updateSkibBuzzer() {
     if (millis() >= skibBuzzerEndTime) {
       noTone(PIN_BUZZER);
       skibBuzzerActive = false;
-      Serial.println("Buzzer do SKIB finalizado.");
+      Serial.println(F("Buzzer do SKIB finalizado."));
     }
     // Caso contrário, manter o buzzer ligado
   }
@@ -301,9 +297,11 @@ void saveAltitudeToEEPROM(double altitude, unsigned int index) {
   // Limitação: tratamento para altitudes fora do intervalo representável
   if (altitude < -3276.8) {
     altitudeScaled = -32768;
-  } else if (altitude > 3276.7) {
+  }
+  else if (altitude > 3276.7) {
     altitudeScaled = 32767;
-  } else {
+  }
+  else {
     altitudeScaled = (short int)(altitude * ALTITUDE_SCALE_FACTOR);  // Multiplica por 10 para preservar uma casa decimal
   }
   
@@ -326,27 +324,7 @@ double readAltitudeFromEEPROM(unsigned int index) {
   return altitudeScaled / ALTITUDE_SCALE_FACTOR;
 }
 
-void atualizarEstadoSensor() {
-  if (!sensorConnected) {
-    reconectarSensor();
-  } else {
-    Serial.println("Sensor funcionando normalmente.");
-  }
-}
 
-void reconectarSensor() { //se o sensor ta funcionando o led verde ta aceso
-  sensorConnected = pressure.begin();
-  if (sensorConnected) {
-    Serial.println("Sensor reconectado com sucesso.");
-    ledVerde(true);
-    ledVermelho(false);
-    baseline = readBaselineFromEEPROM();
-  } else {
-    Serial.println("Falha ao reconectar o sensor.");
-    ledVerde(false);
-    ledVermelho(true);
-  }
-}
 
 
 double getSmoothedAltitude(double newAltitude) { //faz  a media das ultimas windowsize altitudes
@@ -392,12 +370,12 @@ double getPressure() {
 
 void ativaSkib() {
   digitalWrite(PIN_SKIB, HIGH);
-  ledVermelho(true);
+  setRGB(255, 0, 0); // Red
 }
 
 void desativarSkib() {
   digitalWrite(PIN_SKIB, LOW);
-  ledVermelho(false);
+  // The LED will be controlled by updateStateLED in the loop
 }
 
 // Salva a altitude máxima na EEPROM
@@ -422,30 +400,13 @@ void saveBaselineToEEPROM(double pressure) {
   EEPROM.put(BASE_PRESSURE_ADDRESS, pressure);
 }
 
-void ledVerde(bool estado) {
-  digitalWrite(PIN_LED_GREEN, estado ? HIGH : LOW);
+void setRGB(byte red, byte green, byte blue) {
+  analogWrite(PIN_LED_RED, red);
+  analogWrite(PIN_LED_GREEN, green);
+  analogWrite(PIN_LED_BLUE, blue);
 }
 
-void ledVermelho(bool estado) {
-  digitalWrite(PIN_LED_RED, estado ? HIGH : LOW);
-}
 
-// Atualiza o LED "working" (pino 12) sem bloquear
-void updateWorkingLED() {
-  unsigned long now = millis();
-
-  // 1) Reseta o ciclo a cada BLINK_INTERVAL
-  if (now - previousBlinkMillis >= BLINK_INTERVAL) {
-    previousBlinkMillis = now;
-  }
-
-  // 2) Liga o LED durante os primeiros BLINK_ON_TIME ms do ciclo, caso contrário desliga
-  if (now - previousBlinkMillis < BLINK_ON_TIME) {
-    digitalWrite(PIN_LED_WORKING, HIGH);
-  } else {
-    digitalWrite(PIN_LED_WORKING, LOW);
-  }
-}
 // Dispara o buzzer baseado no estado atual do sistema
 void updateBuzzerByState() {
   if (skibBuzzerActive) return; // Não interferir com o buzzer do SKIB
@@ -492,6 +453,46 @@ void updateBuzzerByState() {
   }
 }
 
+void updateStateLED() {
+  unsigned long currentTime = millis();
+  int blinkSpeed;
+
+  // Determine blink speed based on state
+  switch (currentState) {
+    case PRE_FLIGHT:
+      blinkSpeed = 1000; // Slow blink
+      break;
+    case ASCENT:
+      blinkSpeed = 250;  // Fast blink
+      break;
+    case RECOVERY:
+      blinkSpeed = 1500; // Slower blink
+      break;
+    default:
+      blinkSpeed = 1000;
+      break;
+  }
+
+  // Simple blinking logic
+  if ((currentTime / blinkSpeed) % 2 == 0) {
+    // Set color based on state
+    switch (currentState) {
+      case PRE_FLIGHT:
+        setRGB(0, 0, 255); // Blue
+        break;
+      case ASCENT:
+        setRGB(0, 255, 255); // Cyan
+        break;
+      case RECOVERY:
+        setRGB(255, 165, 0); // Orange
+        break;
+    }
+  } else {
+    // LED is off during the other half of the blink cycle
+    setRGB(0, 0, 0);
+  }
+}
+
 // Verifica se as leituras de altitude estão estáveis
 bool isAltitudeStable() {
   return abs(alturasSuavizadas[0] - alturasSuavizadas[1]) < 5.0 &&
@@ -501,9 +502,9 @@ bool isAltitudeStable() {
 void resetBaseline() {
   baseline = getPressure();
   saveBaselineToEEPROM(baseline);
-  Serial.print("Baseline resetado: ");
+  Serial.print(F("Baseline resetado: "));
   Serial.print(baseline);
-  Serial.println(" m (- nível do mar).");
+  Serial.println(F(" m (- nível do mar)."));
 }
 
 
@@ -513,7 +514,7 @@ void activateRecoverySystem() {
   armado = false;           
   isDescending = true;
   currentState = RECOVERY;   // Transição para estado de recuperação
-  ledVermelho(HIGH);
+  setRGB(255, 0, 0); // Red
   skibActivatedAt = millis();  // marca o instante de acionamento
   skibDeactivated  = false;    // garante que ainda não desativamos
   saveMaxAltitudeToEEPROM((short int)(maxAltitude * 10));
@@ -523,7 +524,7 @@ void activateRecoverySystem() {
   skibBuzzerActive = true;
   skibBuzzerEndTime = millis() + SKIB_BUZZER_DURATION;
   
-  Serial.println("Sistema de recuperação ativado com buzzer!");
+  Serial.println(F("Sistema de recuperação ativado com buzzer!"));
 }
 
 // ========== NOVAS FUNÇÕES PARA SISTEMA DE ESTADOS ==========
@@ -571,9 +572,9 @@ void handlePreFlightState() {
   addToPreFlightQueue(smoothedAltitude);
   
   // Não grava na EEPROM durante pré-voo, apenas monitora
-  Serial.print("Pré-voo - Altitude: ");
+  Serial.print(F("Pré-voo - Altitude: "));
   Serial.print(smoothedAltitude);
-  Serial.println(" m (não gravando na EEPROM)");
+  Serial.println(F(" m (não gravando na EEPROM)"));
 }
 
 // Gerencia o estado ASCENT
@@ -586,13 +587,13 @@ void handleAscentState() {
     recordCounter++;
     lastRecordTime = millis();
     
-    Serial.print("ASCENSÃO - Ponto: ");
+    Serial.print(F("ASCENSÃO - Ponto: "));
     Serial.print(recordCounter);
-    Serial.print(", Tempo: ");
+    Serial.print(F(", Tempo: "));
     Serial.print(lastRecordTime);
-    Serial.print(" ms, Altura: ");
+    Serial.print(F(" ms, Altura: "));
     Serial.print(smoothedAltitude);
-    Serial.println(" m");
+    Serial.println(F(" m"));
   }
 }
 
@@ -606,13 +607,13 @@ void handleRecoveryState() {
     recordCounter++;
     lastRecordTime = millis();
     
-    Serial.print("RECUPERAÇÃO - Ponto: ");
+    Serial.print(F("RECUPERAÇÃO - Ponto: "));
     Serial.print(recordCounter);
-    Serial.print(", Tempo: ");
+    Serial.print(F(", Tempo: "));
     Serial.print(lastRecordTime);
-    Serial.print(" ms, Altura: ");
+    Serial.print(F(" ms, Altura: "));
     Serial.print(smoothedAltitude);
-    Serial.println(" m");
+    Serial.println(F(" m"));
   }
 }
 
@@ -623,7 +624,7 @@ void checkStateTransitions() {
       // Transição para ASCENT quando altura ultrapassa threshold
       if (smoothedAltitude >= ASCENT_THRESHOLD) {
         currentState = ASCENT;
-        Serial.println("TRANSIÇÃO: PRE_FLIGHT -> ASCENT");
+        Serial.println(F("TRANSIÇÃO: PRE_FLIGHT -> ASCENT"));
         
         // Salvar os pontos pré-voo na EEPROM
         savePreFlightPointsToEEPROM();
@@ -636,7 +637,7 @@ void checkStateTransitions() {
     case ASCENT:
       // Transição para RECOVERY quando detecta descida significativa
       if (alturasSuavizadas[0] <= maxAltitude - DESCENT_DETECTION_THRESHOLD && armado) {
-        Serial.println("TRANSIÇÃO: ASCENT -> RECOVERY");
+        Serial.println(F("TRANSIÇÃO: ASCENT -> RECOVERY"));
         activateRecoverySystem();
         apogeuDetectado = true;
         isDescending = true;
@@ -651,7 +652,7 @@ void checkStateTransitions() {
 
 // Salva os pontos pré-voo na EEPROM
 void savePreFlightPointsToEEPROM() {
-  Serial.println("Salvando pontos pré-voo na EEPROM...");
+  Serial.println(F("Salvando pontos pré-voo na EEPROM..."));
   
   // Determinar quantos pontos salvar
   int pointsToSave = preFlightQueueFull ? PRE_FLIGHT_QUEUE_SIZE : preFlightQueueIndex;
@@ -671,13 +672,13 @@ void savePreFlightPointsToEEPROM() {
     saveAltitudeToEEPROM(altitude, recordCounter);
     recordCounter++;
     
-    Serial.print("Ponto pré-voo #");
+    Serial.print(F("Ponto pré-voo #"));
     Serial.print(i);
-    Serial.print(": ");
+    Serial.print(F(": "));
     Serial.print(altitude);
-    Serial.println(" m");
+    Serial.println(F(" m"));
   }
   
-  Serial.print("Total de pontos pré-voo salvos: ");
+  Serial.print(F("Total de pontos pré-voo salvos: "));
   Serial.println(pointsToSave);
 }
