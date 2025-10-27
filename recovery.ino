@@ -118,6 +118,9 @@ bool buzzerState = HIGH; // buzzer inativo é HIGH
 const unsigned long SENSOR_READ_INTERVAL = 50;  // 50ms entre leituras do sensor
 unsigned long lastSensorReadTime = 0;
 
+// Armazena o começo do voo
+unsigned long flightStartTime = 0; 
+
 void setup() {
   Serial.begin(9600);
   Serial.println(F("Iniciando sistema de altímetro"));
@@ -199,11 +202,18 @@ bool setupSDCard() {
 
 void logDataToSD() {
   if (logFile) {
-    logFile.print(millis());
+
+    unsigned long tempoDeVoo_ms = millis() - flightStartTime; //Converter o tempo de vôo para tempo de vôo efetivo em segundos 
+    
+    double tempoDeVoo_s = tempoDeVoo_ms / 1000.0;
+    
+    logFile.print(tempoDeVoo_s);
+    
     logFile.print(",");
     logFile.print(smoothedAltitude);
     logFile.print(",");
     logFile.println(getStateString());
+    logFile.flush();
   }
 }
 
@@ -232,6 +242,11 @@ void loop() {
 
       // Atualizar alturas suavizadas
       updateSmoothAltitudeHistory();
+
+
+      if (currentState != PRE_FLIGHT) {
+          logDataToSD(); // Chama a gravação da altura para o modulo sd
+      }
 
       Serial.print(F("Estado: "));
       Serial.print(getStateString());
@@ -624,6 +639,8 @@ void checkStateTransitions() {
       // Transição para ASCENT quando altura ultrapassa threshold
       if (smoothedAltitude >= ASCENT_THRESHOLD) {
         currentState = ASCENT;
+        flightStartTime = millis(); //começa a contar tempo de voo
+
         Serial.println(F("TRANSIÇÃO: PRE_FLIGHT -> ASCENT"));
         
         // Salvar os pontos pré-voo na EEPROM
